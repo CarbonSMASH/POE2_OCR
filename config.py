@@ -129,11 +129,71 @@ FILTER_FRAGMENT_CHAOS_THRESHOLDS = {
 FILTER_LAST_UPDATE_FILE = CACHE_DIR / "filter_last_update"
 
 # ─────────────────────────────────────────────
+# DPS & Defense Classification
+# ─────────────────────────────────────────────
+# Attack weapons where DPS drives value (staves/wands are caster, excluded)
+DPS_ITEM_CLASSES = frozenset({
+    "Bows", "Crossbows",
+    "One Hand Swords", "Two Hand Swords",
+    "One Hand Axes", "Two Hand Axes",
+    "One Hand Maces", "Two Hand Maces",
+    "Daggers", "Claws", "Flails", "Spears",
+})
+
+TWO_HAND_CLASSES = frozenset({
+    "Bows", "Crossbows",
+    "Two Hand Swords", "Two Hand Axes", "Two Hand Maces",
+})
+
+DEFENSE_ITEM_CLASSES = frozenset({
+    "Body Armours", "Boots", "Gloves", "Helmets", "Shields",
+    "Bucklers", "Foci",
+})
+
+# DPS thresholds: (terrible, low, decent, good) total DPS values
+# Keyed by minimum ilvl bracket
+DPS_BRACKETS_2H = {
+    68: (150, 250, 400, 600),   # endgame
+    0:  (30, 60, 120, 200),     # leveling
+}
+DPS_BRACKETS_1H = {
+    68: (80, 150, 250, 400),    # endgame
+    0:  (15, 35, 70, 120),      # leveling
+}
+
+# Defense thresholds per slot: (terrible, low, decent, good)
+DEFENSE_THRESHOLDS = {
+    "Body Armours": (200, 400, 700, 1000),
+    "Shields":      (150, 300, 500, 750),
+    "Helmets":      (100, 200, 350, 500),
+    "Gloves":       (80, 160, 280, 400),
+    "Boots":        (80, 160, 280, 400),
+    "Bucklers":     (100, 200, 350, 500),
+    "Foci":         (50, 100, 200, 350),
+}
+
+# Trade API filter multipliers (search for items with >= X% of this item's stats)
+TRADE_DPS_FILTER_MULT = 0.75
+TRADE_DEFENSE_FILTER_MULT = 0.70
+
+# ─────────────────────────────────────────────
 # RePoE Mod Database (local scoring engine)
 # ─────────────────────────────────────────────
 REPOE_BASE_URL = "https://repoe-fork.github.io/poe2"
 REPOE_CACHE_DIR = CACHE_DIR / "repoe"
 REPOE_CACHE_TTL = 7 * 86400  # 7 days
+
+# Grade-to-overlay tier mapping (local scoring → overlay colors)
+GRADE_TIER_MAP = {
+    "S": "high",
+    "A": "good",
+    "B": "decent",
+    "C": "low",
+    "JUNK": "low",
+}
+
+# Calibration log file (grade vs actual trade price)
+CALIBRATION_LOG_FILE = CACHE_DIR / "calibration.jsonl"
 
 # ─────────────────────────────────────────────
 # Logging
