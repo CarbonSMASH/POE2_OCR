@@ -21,6 +21,17 @@
 
 ## Completed
 
+### Session 11 (2026-02-16)
+- [x] Auto-calibration queue — A/S items always queued for background trade API lookup, B sampled 1-in-3, C/JUNK sampled 1-in-10. Results logged to calibration.jsonl silently.
+- [x] Fix Ctrl key desync — synthetic Ctrl+C now skips Ctrl down/up when user is already holding Ctrl physically, preventing game from seeing bare 'C' keypresses during rapid stash scanning
+- [x] Fix Mana weight inflation — moved maximummana/increasedmana from Standard (1.0) to Filler (0.3); was driving false A/S grades
+- [x] Fix T40 phantom tier scoring — percentile floor (0.30) now only applies to T1-T10; deep tiers in oversized ladders get natural low percentile
+- [x] Fix Life/AllRes as common in trade — removed "maximum life" and "to all elemental resistances" from common patterns; they drive real value on jewelry
+- [x] Cap wild calibration estimates — capped at min(2x max observed sample, 500 divine) to prevent 8000+ divine extrapolations with few samples
+- [x] Fix rate-limited auto-cal items lost — queue waits out rate limits and re-queues items instead of discarding
+- [x] Tighten S/A grade requirements — S needs 3+ key mods + 4+ total mods; A needs 3+ total mods
+- [x] Added display names for "damage to" mod groups (AddPhys, AddFire, etc.)
+
 ### Session 10 (2026-02-16)
 - [x] Discord webhook bug reporting — Ctrl+Shift+B opens dark-themed dialog, collects logs + clipboard captures + system info, uploads to Discord channel
 - [x] Bug report dialog — standalone Toplevel (not transient), forced above fullscreen via Win32 SetWindowPos, timestamp header, title + description fields, Ctrl+Enter to send
