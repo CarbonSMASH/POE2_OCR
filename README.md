@@ -8,23 +8,42 @@ Copy any item with Ctrl+C and instantly see its market value in an overlay. No O
 
 ## Quick Start
 
+### 1. Install Python
+
+Download Python 3.10+ from [python.org](https://www.python.org/downloads/).
+
+**Important:** Check the box that says **"Add Python to PATH"** during install.
+
+### 2. Install Git (if you don't have it)
+
+Download from [git-scm.com](https://git-scm.com/downloads/win) and install with defaults.
+
+### 3. Download the overlay
+
+Open **File Explorer** and navigate to where you want the folder (Desktop, Documents, wherever).
+
+Press **Ctrl+L** to select the address bar, type `powershell`, and hit **Enter** — this opens PowerShell in that folder.
+
+Copy-paste this line into PowerShell and hit Enter:
+
 ```
 git clone https://github.com/CarbonSMASH/POE2_OCR.git
-cd POE2_OCR
 ```
 
-**Double-click `START.bat`** — that's it.
+### 4. Run it
+
+Open the `POE2_OCR` folder and **double-click `START.bat`** — that's it.
 
 On first run it will:
-1. Check Python and install missing packages (`requests`)
+1. Install missing packages (`requests`)
 2. Ask which league you're playing
 3. Launch the overlay
 
 Subsequent launches skip setup and go straight to the overlay.
 
-### Prerequisites
+### Requirements
 
-- **Python 3.10+** — [Download](https://www.python.org/downloads/) (check "Add Python to PATH" during install)
+- **Python 3.10+** (with "Add to PATH" checked)
 - **Windows 10/11** (required for overlay and cursor tracking)
 
 ---
