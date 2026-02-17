@@ -20,6 +20,16 @@
 
 ## Completed
 
+### Session 9 (2026-02-16)
+- [x] DPS & defense stat integration — weapons scored by total DPS output, armor by total defense; low values crush grade
+- [x] Combat stat parsing — extract physical/elemental damage, APS, armour, evasion, ES from clipboard text
+- [x] DPS scoring factor — multiplicative penalty for low-DPS attack weapons (0.15 for terrible, up to 1.15 for exceptional); staves/wands excluded as caster weapons
+- [x] Defense scoring factor — softer penalty for low-defense armor pieces (0.6 for terrible, up to 1.05); per-slot thresholds (body armour through foci)
+- [x] Trade API DPS/defense filters — equipment_filters include `dps`, `ar`, `ev`, `es` minimums (75%/70% of item's values) for comparable pricing
+- [x] Overlay combat tags — shows "280dps" or "850def" when factor penalizes (replaces star count)
+- [x] Calibration JSONL extended — records include total_dps, total_defense, dps_factor, defense_factor
+- [x] 5 new test cases + DPS/defense factor diagnostic curves (34/34 pass)
+
 ### Session 8 (2026-02-16)
 - [x] Adaptive rate limiting — parse `X-Rate-Limit-Ip` and `X-Rate-Limit-Ip-State` headers from every API response to learn actual rate windows (e.g., 5/10s, 15/60s, 30/300s)
 - [x] Proactive backoff — at 50% usage in any window, switch to safe rate (`window_secs / max_hits`); most conservative interval wins
