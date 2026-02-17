@@ -36,6 +36,23 @@ class ParsedItem:
     confidence: float = 0.0
     mods: list = field(default_factory=list)
     unidentified: bool = False
+    corrupted: bool = False
+
+    # Weapon stats
+    physical_damage: tuple = None    # (min, max) or None
+    elemental_damages: list = field(default_factory=list)  # [(min, max), ...]
+    attacks_per_second: float = 0.0
+
+    # Defense stats
+    armour: int = 0
+    evasion: int = 0
+    energy_shield: int = 0
+
+    # Computed (filled during parsing)
+    physical_dps: float = 0.0
+    elemental_dps: float = 0.0
+    total_dps: float = 0.0
+    total_defense: int = 0
 
     @property
     def lookup_key(self) -> str:
@@ -92,6 +109,15 @@ QUALITY_PATTERN = re.compile(r"quality[:\s]*\+?(\d+)%", re.IGNORECASE)
 # POE2 clipboard shows sockets as "Sockets: S S S" (one S per socket)
 SOCKET_PATTERN = re.compile(r"sockets?[:\s]*((?:S\s*)+)", re.IGNORECASE)
 STACK_PATTERN = re.compile(r"stack\s*size[:\s]*(\d+)", re.IGNORECASE)
+
+# Weapon/defense stat patterns (from clipboard header section)
+# Game shows final computed values; optional "(augmented)" suffix ignored by regex
+PHYS_DAMAGE_PATTERN = re.compile(r"Physical Damage:\s*(\d+)[-\u2013](\d+)", re.IGNORECASE)
+ELEM_DAMAGE_PATTERN = re.compile(r"(?:Elemental|Fire|Cold|Lightning|Chaos)\s+Damage:\s*(\d+)[-\u2013](\d+)", re.IGNORECASE)
+ATTACKS_PER_SEC_PATTERN = re.compile(r"Attacks per Second:\s*([\d.]+)", re.IGNORECASE)
+ARMOUR_PATTERN = re.compile(r"Armour:\s*(\d+)", re.IGNORECASE)
+EVASION_PATTERN = re.compile(r"Evasion Rating:\s*(\d+)", re.IGNORECASE)
+ES_PATTERN = re.compile(r"Energy Shield:\s*(\d+)", re.IGNORECASE)
 
 # Waystone/Map patterns
 WAYSTONE_PATTERN = re.compile(r"(waystone|map)\s*(?:tier)?\s*(\d+)", re.IGNORECASE)
@@ -196,6 +222,13 @@ class ItemParser:
         # Check for unidentified items
         if "\nUnidentified" in text or text.endswith("Unidentified"):
             item.unidentified = True
+
+        # Check for corrupted items
+        if "\nCorrupted" in text or text.endswith("Corrupted"):
+            item.corrupted = True
+
+        # Extract weapon/defense stats (DPS, armour, evasion, ES)
+        self._extract_combat_stats(full_text, item)
 
         # Extract mod lines for non-unique equippable items
         if item.rarity in ("rare", "magic"):
@@ -507,6 +540,49 @@ class ItemParser:
             except ValueError:
                 pass
         return 0
+
+    @staticmethod
+    def _extract_combat_stats(text: str, item: 'ParsedItem'):
+        """Extract weapon DPS and defense stats from clipboard text.
+
+        The game displays final computed values (base + quality + mods)
+        in the item's property section. We read those directly.
+        """
+        # Physical damage
+        m = PHYS_DAMAGE_PATTERN.search(text)
+        if m:
+            item.physical_damage = (int(m.group(1)), int(m.group(2)))
+
+        # Elemental damages (can have multiple lines)
+        for m in ELEM_DAMAGE_PATTERN.finditer(text):
+            item.elemental_damages.append((int(m.group(1)), int(m.group(2))))
+
+        # Attacks per second
+        m = ATTACKS_PER_SEC_PATTERN.search(text)
+        if m:
+            item.attacks_per_second = float(m.group(1))
+
+        # Defense stats
+        m = ARMOUR_PATTERN.search(text)
+        if m:
+            item.armour = int(m.group(1))
+        m = EVASION_PATTERN.search(text)
+        if m:
+            item.evasion = int(m.group(1))
+        m = ES_PATTERN.search(text)
+        if m:
+            item.energy_shield = int(m.group(1))
+
+        # Compute DPS
+        if item.attacks_per_second > 0:
+            if item.physical_damage:
+                item.physical_dps = (sum(item.physical_damage) / 2) * item.attacks_per_second
+            for lo, hi in item.elemental_damages:
+                item.elemental_dps += ((lo + hi) / 2) * item.attacks_per_second
+            item.total_dps = item.physical_dps + item.elemental_dps
+
+        # Compute total defense
+        item.total_defense = item.armour + item.evasion + item.energy_shield
 
     def _try_waystone_match(self, text: str) -> Optional[str]:
         """Check if this is a waystone/map item."""
