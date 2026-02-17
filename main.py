@@ -35,6 +35,8 @@ from overlay import PriceOverlay, ConsoleOverlay
 from mod_parser import ModParser
 from trade_client import TradeClient
 from filter_updater import FilterUpdater, find_template_filter
+from mod_database import ModDatabase
+from calibration import CalibrationEngine
 
 logger = logging.getLogger("poe2-overlay")
 
@@ -69,6 +71,15 @@ class POE2PriceOverlay:
             divine_to_chaos_fn=lambda: self.price_cache.divine_to_chaos,
             divine_to_exalted_fn=lambda: self.price_cache.divine_to_exalted,
         )
+        self.mod_database = ModDatabase()
+        self.calibration = CalibrationEngine()
+
+        # Deep query state: last scored item (for Ctrl+Shift+C trade lookup)
+        self._last_scored_item = None
+        self._last_scored_mods = None
+        self._last_scored_result = None
+        self._last_scored_cursor = (0, 0)
+        self._last_scored_lock = threading.Lock()
 
         # Filter updater
         project_dir = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -139,6 +150,20 @@ class POE2PriceOverlay:
         else:
             logger.warning("Rare item pricing disabled (no stat data)")
 
+        # 1b2. Load mod tier database for local scoring
+        if self.mod_parser.loaded:
+            logger.info("Loading mod tier database...")
+            if self.mod_database.load(self.mod_parser):
+                stats = self.mod_database.get_stats()
+                logger.info(f"Local scoring ready (bridge={stats['bridge_size']}, ladders={stats['ladder_count']})")
+                # Load calibration data for score→price estimation
+                from config import CALIBRATION_LOG_FILE
+                n = self.calibration.load(CALIBRATION_LOG_FILE)
+                if n:
+                    logger.info(f"Calibration: {n} samples loaded")
+            else:
+                logger.warning("Local scoring disabled — falling back to trade API")
+
         # 1c. Handle filter update
         if self._test_filter_update:
             logger.info("Running filter update (test mode: hidden items show as tiny text)...")
@@ -156,6 +181,14 @@ class POE2PriceOverlay:
             name="ItemDetector"
         )
         detect_thread.start()
+
+        # 2b. Deep query hotkey listener (Ctrl+Shift+C)
+        if self.mod_database.loaded:
+            threading.Thread(
+                target=self._deep_query_hotkey_loop,
+                daemon=True,
+                name="DeepQueryHotkey",
+            ).start()
 
         # 3. Start status reporting
         status_thread = threading.Thread(
@@ -275,14 +308,41 @@ class POE2PriceOverlay:
                 )
                 return
 
-            # Step 2: Non-unique items with mods → trade API (skip cache which
-            # would match base_type to an unrelated unique's price)
+            # Step 1c: Corrupted uniques → trade API for Vaal-outcome-aware pricing
+            if item.rarity == "unique" and getattr(item, "corrupted", False):
+                static_result = self.price_cache.lookup(
+                    item_name=item.lookup_key,
+                    base_type=item.base_type,
+                    item_level=item.item_level,
+                )
+                self._price_unique_async(item, cursor_x, cursor_y,
+                                         static_result=static_result)
+                return
+
+            # Step 2: Non-unique items with mods → local scoring (or trade API fallback)
             if (item.rarity in ("rare", "magic") and item.mods
                     and self.mod_parser.loaded):
-                # Common/filler mods only — not worth checking
+                # Resolve magic item base_type if missing
+                if not item.base_type and item.name:
+                    resolved = self.mod_parser.resolve_base_type(item.name)
+                    if resolved:
+                        item.base_type = resolved
+
+                parsed_mods = self.mod_parser.parse_mods(item)
+                if not parsed_mods:
+                    self.overlay.show_price(
+                        text="\u2717", tier="low",
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                    )
+                    return
+
+                # Primary path: local scoring (instant, no API calls)
+                if self.mod_database.loaded:
+                    self._score_and_display(item, parsed_mods, cursor_x, cursor_y)
+                    return
+
+                # Fallback: trade API (if mod database failed to load)
                 if self._has_only_common_mods(item.mods):
-                    display_name = item.name or item.base_type
-                    logger.info(f"{item.rarity.title()} with common mods only: {display_name}")
                     self.overlay.show_price(
                         text="\u2717", tier="low",
                         cursor_x=cursor_x, cursor_y=cursor_y,
@@ -525,6 +585,297 @@ class POE2PriceOverlay:
 
         thread = threading.Thread(target=_do_price, daemon=True, name="BasePricer")
         thread.start()
+
+    def _price_unique_async(self, item, cursor_x: int, cursor_y: int,
+                            static_result: dict = None):
+        """Price a corrupted unique via the trade API in a background thread.
+
+        Shows static price immediately if available, then upgrades with
+        trade API result that reflects actual Vaal outcomes + sockets.
+        """
+        display_name = item.name or item.base_type
+        sockets = getattr(item, "sockets", 0) or 0
+        tag = f"{sockets}S corrupted" if sockets else "corrupted"
+
+        # Show static price while trade API loads
+        if static_result:
+            static_display = static_result.get("display", "?")
+            self.overlay.show_price(
+                text=f"{display_name} ({tag}): Checking.",
+                tier=static_result.get("tier", "low"),
+                cursor_x=cursor_x, cursor_y=cursor_y,
+                price_divine=static_result.get("divine_value", 0),
+            )
+        else:
+            self.overlay.show_price(
+                text=f"{display_name} ({tag}): Checking.",
+                tier="low",
+                cursor_x=cursor_x, cursor_y=cursor_y,
+            )
+
+        with self._trade_gen_lock:
+            self._trade_generation += 1
+            my_gen = self._trade_generation
+
+        def _is_stale():
+            with self._trade_gen_lock:
+                return my_gen != self._trade_generation
+
+        search_done = threading.Event()
+
+        def _animate_dots():
+            dots = 1
+            while not search_done.wait(0.4):
+                if _is_stale():
+                    return
+                dots = (dots % 3) + 1
+                self.overlay.show_price(
+                    text=f"{display_name} ({tag}): Checking{'.' * dots}",
+                    tier="low",
+                    cursor_x=cursor_x, cursor_y=cursor_y,
+                )
+
+        def _do_price():
+            anim = threading.Thread(
+                target=_animate_dots, daemon=True, name="UniqueAnim")
+            anim.start()
+            try:
+                if _is_stale():
+                    return
+
+                result = self.trade_client.price_unique_item(
+                    item, is_stale=_is_stale)
+                if _is_stale():
+                    return
+                if result and result.min_price > 0:
+                    self.overlay.show_price(
+                        text=f"{display_name} ({tag}): {result.display}",
+                        tier=result.tier,
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                        price_divine=result.min_price,
+                    )
+                    self.stats["successful_lookups"] += 1
+                elif static_result:
+                    # Trade API returned nothing — fall back to static
+                    static_display = static_result.get("display", "?")
+                    self.overlay.show_price(
+                        text=f"{display_name}: {static_display}",
+                        tier=static_result.get("tier", "low"),
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                        price_divine=static_result.get("divine_value", 0),
+                    )
+                    self.stats["successful_lookups"] += 1
+                else:
+                    self.overlay.show_price(
+                        text="\u2717", tier="low",
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                    )
+                    self.stats["not_found"] += 1
+            except Exception as e:
+                logger.error(f"Unique pricing error: {e}", exc_info=True)
+                if static_result:
+                    self.overlay.show_price(
+                        text=f"{display_name}: {static_result.get('display', '?')}",
+                        tier=static_result.get("tier", "low"),
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                        price_divine=static_result.get("divine_value", 0),
+                    )
+                else:
+                    self.overlay.show_price(
+                        text=f"{display_name}: ?", tier="low",
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                    )
+                self.stats["not_found"] += 1
+            finally:
+                search_done.set()
+
+        thread = threading.Thread(target=_do_price, daemon=True,
+                                  name="UniquePricer")
+        thread.start()
+
+    # ─── Local Scoring + Deep Query ──────────────────
+
+    def _score_and_display(self, item, parsed_mods, cursor_x, cursor_y):
+        """Score item locally, display grade, store state for deep query."""
+        from config import GRADE_TIER_MAP
+        score = self.mod_database.score_item(item, parsed_mods)
+        display_name = item.name or item.base_type
+
+        # Store for deep query hotkey
+        with self._last_scored_lock:
+            self._last_scored_item = item
+            self._last_scored_mods = parsed_mods
+            self._last_scored_result = score
+            self._last_scored_cursor = (cursor_x, cursor_y)
+
+        overlay_tier = GRADE_TIER_MAP.get(score.grade.value, "low")
+
+        # Query calibration for price estimate
+        price_est = self.calibration.estimate(
+            score.normalized_score, getattr(item, "item_class", "") or "")
+        d2c = self.price_cache.divine_to_chaos
+        text = score.format_overlay_text(price_estimate=price_est,
+                                         divine_to_chaos=d2c)
+
+        # If we have a price estimate, use price-based tier instead of grade-based
+        if price_est is not None:
+            chaos_val = price_est * d2c
+            if chaos_val >= 25:
+                overlay_tier = "high"
+            elif chaos_val >= 5:
+                overlay_tier = "good"
+            elif chaos_val >= 1:
+                overlay_tier = "decent"
+            else:
+                overlay_tier = "low"
+
+        # Log combat factors when they modify the score
+        if score.dps_factor != 1.0:
+            logger.info(f"DPS factor: {score.dps_factor:.2f} (dps={score.total_dps:.0f})")
+        if score.defense_factor != 1.0:
+            logger.info(f"Defense factor: {score.defense_factor:.2f} (def={score.total_defense})")
+
+        log_extra = f" est~{price_est:.1f}d" if price_est else ""
+        logger.info(f"Grade {score.grade.value}: {display_name} "
+                     f"(score={score.normalized_score:.3f}{log_extra}) "
+                     f"{score.top_mods_summary}")
+
+        self.overlay.show_price(text=text, tier=overlay_tier,
+                                cursor_x=cursor_x, cursor_y=cursor_y)
+        if score.grade.value != "JUNK":
+            self.stats["successful_lookups"] += 1
+
+    def _deep_query_hotkey_loop(self):
+        """Poll for Ctrl+Shift+C to trigger trade API lookup on last scored item."""
+        import ctypes
+        VK_SHIFT, VK_CONTROL, VK_C = 0x10, 0x11, 0x43
+        _gaks = ctypes.windll.user32.GetAsyncKeyState
+        was_pressed = False
+
+        while True:
+            time.sleep(0.05)  # 20 Hz
+            pressed = bool(_gaks(VK_CONTROL) & 0x8000
+                           and _gaks(VK_SHIFT) & 0x8000
+                           and _gaks(VK_C) & 0x8000)
+            if pressed and not was_pressed:
+                was_pressed = True
+                self._trigger_deep_query()
+            elif not pressed:
+                was_pressed = False
+
+    def _trigger_deep_query(self):
+        """Execute trade API lookup on the last locally-scored item."""
+        with self._last_scored_lock:
+            item = self._last_scored_item
+            mods = self._last_scored_mods
+            score = self._last_scored_result
+            cx, cy = self._last_scored_cursor
+
+        if not item or not mods:
+            return
+        if not self.item_detector.game_window.is_poe2_foreground():
+            return
+
+        logger.info(f"Deep query: {item.name or item.base_type}")
+        self._price_rare_deep_async(item, mods, score, cx, cy)
+
+    def _price_rare_deep_async(self, item, parsed_mods, score_result, cursor_x, cursor_y):
+        """Trade API lookup for a locally-scored item (triggered by Ctrl+Shift+C)."""
+        display_name = item.name or item.base_type
+        grade_str = score_result.grade.value
+
+        with self._trade_gen_lock:
+            self._trade_generation += 1
+            my_gen = self._trade_generation
+
+        def _is_stale():
+            with self._trade_gen_lock:
+                return my_gen != self._trade_generation
+
+        self.overlay.show_price(text=f"{grade_str}: Checking.",
+                                tier="low",
+                                cursor_x=cursor_x, cursor_y=cursor_y)
+        search_done = threading.Event()
+
+        def _animate_dots():
+            dots = 1
+            while not search_done.wait(0.4):
+                if _is_stale():
+                    return
+                dots = (dots % 3) + 1
+                self.overlay.show_price(
+                    text=f"{grade_str}: Checking{'.' * dots}",
+                    tier="low",
+                    cursor_x=cursor_x, cursor_y=cursor_y)
+
+        def _do_deep():
+            threading.Thread(target=_animate_dots, daemon=True,
+                             name="DeepAnim").start()
+            try:
+                if _is_stale():
+                    return
+
+                result = self.trade_client.price_rare_item(
+                    item, parsed_mods, is_stale=_is_stale)
+                if _is_stale():
+                    return
+                if result:
+                    self.overlay.show_price(
+                        text=f"{display_name}: {result.display}",
+                        tier=result.tier,
+                        cursor_x=cursor_x, cursor_y=cursor_y,
+                        estimate=result.estimate,
+                        price_divine=result.min_price)
+                    self.stats["successful_lookups"] += 1
+                    self._log_calibration(score_result, result, item)
+                else:
+                    self.overlay.show_price(
+                        text=f"{grade_str}: No listings", tier="low",
+                        cursor_x=cursor_x, cursor_y=cursor_y)
+                    self.stats["not_found"] += 1
+            except Exception as e:
+                logger.error(f"Deep query error: {e}", exc_info=True)
+                self.overlay.show_price(
+                    text=f"{grade_str}: ?", tier="low",
+                    cursor_x=cursor_x, cursor_y=cursor_y)
+            finally:
+                search_done.set()
+
+        threading.Thread(target=_do_deep, daemon=True,
+                         name="DeepQueryPricer").start()
+
+    def _log_calibration(self, score_result, trade_result, item):
+        """Append grade-vs-price calibration record and live-update engine."""
+        import json
+        from config import CALIBRATION_LOG_FILE
+        try:
+            record = {
+                "ts": int(time.time()),
+                "grade": score_result.grade.value,
+                "score": round(score_result.normalized_score, 3),
+                "item_class": getattr(item, "item_class", ""),
+                "top_mods": score_result.top_mods_summary,
+                "min_divine": trade_result.min_price,
+                "max_divine": trade_result.max_price,
+                "results": trade_result.num_results,
+                "estimate": trade_result.estimate,
+                "total_dps": round(score_result.total_dps, 1),
+                "total_defense": score_result.total_defense,
+                "dps_factor": round(score_result.dps_factor, 3),
+                "defense_factor": round(score_result.defense_factor, 3),
+            }
+            CALIBRATION_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(CALIBRATION_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+
+            # Live-update calibration engine so estimates improve within session
+            if trade_result.min_price > 0:
+                self.calibration.add_sample(
+                    score_result.normalized_score,
+                    trade_result.min_price,
+                    getattr(item, "item_class", ""))
+        except Exception as e:
+            logger.warning(f"Calibration log failed: {e}")
 
     # Items that should always show ✗ (too cheap to bother pricing)
     _WORTHLESS_ITEMS = (
