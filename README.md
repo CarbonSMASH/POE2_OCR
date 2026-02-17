@@ -53,10 +53,11 @@ Subsequent launches skip setup and go straight to the overlay.
 ```
 
 1. **Clipboard Monitoring** — Detects when you Ctrl+C an item in POE2. Parses the item text from the clipboard.
-2. **Item Detection** — Identifies the item type (unique, currency, gem, rare, etc.) and extracts key properties.
-3. **Local Price Cache** — Downloads all price data from poe.ninja periodically and caches it locally. Price lookups are instant.
-4. **Trade API** — For rare items, queries the POE2 trade API with the item's actual mods to find comparable listings.
-5. **Transparent Overlay** — Click-through window that shows a color-coded price tag near your cursor.
+2. **Item Detection** — Identifies the item type (unique, currency, gem, rare, etc.) and extracts key properties including weapon DPS and armor defense values.
+3. **Local Mod Scoring** — Rare/magic items are graded instantly (S/A/B/C/JUNK) using RePoE mod tier data. Attack weapons are penalized for low DPS; armor pieces for low defense. Zero API calls needed.
+4. **Local Price Cache** — Downloads all price data from poe.ninja periodically and caches it locally. Price lookups are instant.
+5. **Trade API** — Deep query (Ctrl+Shift+C) queries the POE2 trade API with the item's actual mods, DPS, and defense to find comparable listings.
+6. **Transparent Overlay** — Click-through window that shows a color-coded price tag near your cursor.
 
 ---
 
@@ -96,8 +97,11 @@ POE2_OCR/
 ├── item_detection.py      # Item type detection from clipboard text
 ├── item_parser.py         # Parse item text into structured data
 ├── mod_parser.py          # Mod parsing for rare item pricing
+├── mod_database.py        # Local mod scoring engine (RePoE tier data)
+├── calibration.py         # Score-to-price calibration engine
 ├── price_cache.py         # poe.ninja data fetcher & local cache
 ├── trade_client.py        # POE2 trade API client for rare items
+├── filter_updater.py      # Loot filter economy re-tiering
 ├── overlay.py             # Transparent overlay window
 ├── screen_capture.py      # Screen region capture utilities
 ├── test_pipeline.py       # Pipeline validation tests
