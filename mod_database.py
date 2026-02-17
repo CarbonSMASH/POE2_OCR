@@ -26,7 +26,11 @@ from pathlib import Path
 
 import requests
 
-from config import REPOE_BASE_URL, REPOE_CACHE_DIR, REPOE_CACHE_TTL
+from config import (
+    REPOE_BASE_URL, REPOE_CACHE_DIR, REPOE_CACHE_TTL,
+    DPS_ITEM_CLASSES, TWO_HAND_CLASSES, DEFENSE_ITEM_CLASSES,
+    DPS_BRACKETS_2H, DPS_BRACKETS_1H, DEFENSE_THRESHOLDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +120,64 @@ class ItemScore:
     suffix_count: int
     mod_scores: List[ModScore]
     top_mods_summary: str    # "T1 CritMulti, T2 MovementSpeed"
+    top_tier_count: int = 0  # count of valuable T1/T2 mods (weight >= 1.0)
+    dps_factor: float = 1.0
+    defense_factor: float = 1.0
+    total_dps: float = 0.0
+    total_defense: int = 0
+
+    def format_overlay_text(self, price_estimate: float = None,
+                            divine_to_chaos: float = 0) -> str:
+        """Format for overlay display.
+
+        JUNK:  '✗'
+        C:     'C'
+        B/A/S without price:  'A 67% ★3: T1 SpellCrit, T1 CritChance, T1 ES'
+        B/A/S with price:     'A ~130d ★3: T1 SpellCrit, T1 CritChance, T1 ES'
+        """
+        if self.grade == Grade.JUNK:
+            return "\u2717"
+        g = self.grade.value
+        if self.grade == Grade.C:
+            return g
+
+        # Star count: valuable T1/T2 mods
+        star = f"\u2605{self.top_tier_count}" if self.top_tier_count > 0 else ""
+
+        # Build price or score tag
+        if price_estimate is not None and price_estimate > 0:
+            if price_estimate >= 10:
+                ptag = f"~{price_estimate:.0f}d"
+            elif price_estimate >= 1.0:
+                ptag = f"~{price_estimate:.1f}d"
+            elif divine_to_chaos > 0:
+                chaos = price_estimate * divine_to_chaos
+                ptag = f"~{chaos:.0f}c"
+            else:
+                ptag = f"~{price_estimate:.2f}d"
+        else:
+            pct = int(self.normalized_score * 100)
+            ptag = f"{pct}%"
+
+        # Combat stat tag: show DPS/defense when factor penalizes
+        combat_tag = ""
+        if self.dps_factor < 1.0 and self.total_dps > 0:
+            combat_tag = f"{int(self.total_dps)}dps"
+        elif self.defense_factor < 1.0 and self.total_defense > 0:
+            combat_tag = f"{self.total_defense}def"
+
+        # Assemble: "A 67% ★3: T1 CritMulti, T2 Life"
+        # or with combat: "B 45% 280dps: T1 PhysDmg, T2 AtkSpd"
+        parts = [g, ptag]
+        if combat_tag:
+            parts.append(combat_tag)
+        elif star:
+            parts.append(star)
+        prefix = " ".join(parts)
+
+        if self.top_mods_summary:
+            return f"{prefix}: {self.top_mods_summary}"
+        return prefix
 
 
 # ─── Weight Table ─────────────────────────────────────
@@ -210,6 +272,178 @@ def _is_common_mod(raw_text: str) -> bool:
     patterns = _get_common_patterns()
     text_lower = raw_text.lower()
     return any(pat in text_lower for pat in patterns)
+
+
+# ─── DPS & Defense Factors ────────────────────────────
+
+def _select_bracket(brackets: dict, item_level: int) -> tuple:
+    """Select the DPS bracket for a given item level.
+
+    Brackets are keyed by minimum ilvl. Returns the highest bracket
+    whose min_ilvl <= item_level.
+    """
+    best_ilvl = 0
+    best = brackets[0]
+    for min_ilvl, thresholds in brackets.items():
+        if min_ilvl <= item_level and min_ilvl >= best_ilvl:
+            best_ilvl = min_ilvl
+            best = thresholds
+    return best
+
+
+def _interpolate(value: float, thresholds: tuple,
+                 factors: tuple) -> float:
+    """Linear interpolation between threshold/factor pairs.
+
+    thresholds: (terrible, low, decent, good)
+    factors:    (below_terrible, at_terrible, at_low, at_decent, at_good, above_good)
+    """
+    terrible, low, decent, good = thresholds
+    f_below, f_terrible, f_low, f_decent, f_good, f_above = factors
+
+    if value < terrible:
+        return f_below
+    if value < low:
+        t = (value - terrible) / (low - terrible)
+        return f_terrible + t * (f_low - f_terrible)
+    if value < decent:
+        t = (value - low) / (decent - low)
+        return f_low + t * (f_decent - f_low)
+    if value < good:
+        t = (value - decent) / (good - decent)
+        return f_decent + t * (f_good - f_decent)
+    # Above good — cap at f_above
+    return min(f_above, f_good + (value - good) / good * (f_above - f_good))
+
+
+def _dps_factor(total_dps: float, item_class: str, item_level: int) -> float:
+    """Multiplicative DPS factor for attack weapon scoring.
+
+    Returns 1.0 for non-attack-weapons or when DPS=0 (unparsed).
+    For attack weapons, penalizes low DPS and slightly rewards high DPS.
+    """
+    if not total_dps or total_dps <= 0:
+        return 1.0
+    if item_class not in DPS_ITEM_CLASSES:
+        return 1.0
+
+    brackets = DPS_BRACKETS_2H if item_class in TWO_HAND_CLASSES else DPS_BRACKETS_1H
+    thresholds = _select_bracket(brackets, item_level)
+
+    #                    below   terrible  low   decent  good   above
+    return _interpolate(total_dps, thresholds,
+                        (0.15,  0.15,     0.5,  0.85,   1.0,   1.15))
+
+
+def _defense_factor(total_defense: int, item_class: str) -> float:
+    """Multiplicative defense factor for armor piece scoring.
+
+    Returns 1.0 for non-armor items or when total_defense=0.
+    Narrower range than DPS — defense is a softer value signal.
+    """
+    if not total_defense or total_defense <= 0:
+        return 1.0
+    if item_class not in DEFENSE_ITEM_CLASSES:
+        return 1.0
+
+    thresholds = DEFENSE_THRESHOLDS.get(item_class)
+    if not thresholds:
+        return 1.0
+
+    #                    below  terrible  low   decent  good   above
+    return _interpolate(float(total_defense), thresholds,
+                        (0.6,  0.6,      0.75, 0.9,    1.0,   1.05))
+
+
+# ─── Display Names ───────────────────────────────────
+
+# Maps RePoE group name substrings (lowercase) → short overlay label.
+# Checked in order; first match wins.
+_DISPLAY_NAMES: List[Tuple[str, str]] = [
+    # Premium (3.0)
+    ("movementvelocity", "MoveSpd"),
+    ("movespeed", "MoveSpd"),
+    ("socketedgemlevel", "GemLvl"),
+    ("skilllevels", "SkillLvl"),
+    ("gemlevels", "GemLvl"),
+    ("criticalstrikemultiplier", "CritMulti"),
+    ("critmulti", "CritMulti"),
+    ("criticalmulti", "CritMulti"),
+    ("spellcriticalstrikechance", "SpellCrit"),
+    ("criticalstrikechance", "CritChance"),
+    ("critchance", "CritChance"),
+    ("spelldamage", "SpellDmg"),
+    ("physicaldamage", "PhysDmg"),
+    # Key (2.0)
+    ("attackspeed", "AtkSpd"),
+    ("castspeed", "CastSpd"),
+    ("firedamage", "FireDmg"),
+    ("colddamage", "ColdDmg"),
+    ("lightningdamage", "LightDmg"),
+    ("chaosdamage", "ChaosDmg"),
+    ("elementaldamage", "EleDmg"),
+    ("manareservation", "ManaRes"),
+    ("liferecoup", "Recoup"),
+    ("lifeonhit", "LifeOnHit"),
+    ("lifeleech", "Leech"),
+    ("projectilespeed", "ProjSpd"),
+    ("areadamage", "AreaDmg"),
+    ("areaofdamage", "AreaDmg"),
+    # Standard (1.0)
+    ("maximumlife", "Life"),
+    ("increasedlife", "Life"),
+    ("energyshieldregeneration", "ESRegen"),
+    ("energyshield", "ES"),
+    ("maximummana", "Mana"),
+    ("increasedmana", "Mana"),
+    ("spirit", "Spirit"),
+    ("armour", "Armour"),
+    ("evasion", "Evasion"),
+    # Filler (0.3)
+    ("allresist", "AllRes"),
+    ("elementalresist", "AllRes"),
+    ("fireresist", "FireRes"),
+    ("coldresist", "ColdRes"),
+    ("lightningresist", "LightRes"),
+    ("chaosresist", "ChaosRes"),
+    ("resistance", "Res"),
+    ("allattributes", "AllAttr"),
+    ("strength", "Str"),
+    ("dexterity", "Dex"),
+    ("intelligence", "Int"),
+    ("accuracy", "Acc"),
+    ("liferegeneration", "LifeRegen"),
+    ("manaregeneration", "ManaRegen"),
+    ("energyshieldrecharge", "ESRecharge"),
+    ("regen", "Regen"),
+    ("flask", "Flask"),
+    ("stun", "Stun"),
+    ("block", "Block"),
+    # Near-zero (0.1)
+    ("thorns", "Thorns"),
+    ("lightradius", "Light"),
+    ("itemrarity", "Rarity"),
+    ("itemfoundrarity", "Rarity"),
+]
+
+
+def _display_name(group: str) -> str:
+    """Convert a RePoE mod group name to a short overlay-friendly label."""
+    group_lower = group.lower()
+    for pattern, label in _DISPLAY_NAMES:
+        if pattern in group_lower:
+            return label
+    # Fallback: strip common prefixes and add spaces before capitals
+    for prefix in ("Increased", "Local", "Added", "Base", "Maximum", "Percentage"):
+        if group.startswith(prefix):
+            group = group[len(prefix):]
+            break
+    # "CriticalStrikeChance" → "Critical Strike Chance" → trim to first 2 words
+    spaced = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', group)
+    words = spaced.split()
+    if len(words) > 2:
+        return ''.join(w[0] for w in words)  # Acronym: "CSC"
+    return spaced
 
 
 # ─── Stat ID Bridge ──────────────────────────────────
@@ -353,6 +587,18 @@ class ModDatabase:
         max_possible = sum(ms.weight for ms in mod_scores)
         normalized = total_weighted / max_possible if max_possible > 0 else 0.0
 
+        # Apply DPS/defense combat factors
+        item_class_raw = getattr(item, 'item_class', '') or ''
+        item_level = getattr(item, 'item_level', 0) or 0
+        total_dps = getattr(item, 'total_dps', 0.0) or 0.0
+        total_defense = getattr(item, 'total_defense', 0) or 0
+
+        d_factor = _dps_factor(total_dps, item_class_raw, item_level)
+        a_factor = _defense_factor(total_defense, item_class_raw)
+        combat_factor = min(d_factor, a_factor)  # only one applies per item
+
+        normalized = max(0.0, min(1.0, normalized * combat_factor))
+
         # Count key mods and high-tier key mods
         key_mods = [ms for ms in mod_scores if ms.is_key_mod]
         high_tier_key = [
@@ -360,22 +606,28 @@ class ModDatabase:
             if ms.tier and ms.tier.tier_num <= 2
         ]
 
+        # Count valuable T1/T2 mods (weight >= 1.0 excludes filler like thorns/rarity)
+        valuable_top_tier = [
+            ms for ms in mod_scores
+            if ms.tier and ms.tier.tier_num <= 2 and ms.weight >= 1.0
+        ]
+
+        # Count special affixes (fractured/desecrated — permanent and rare)
+        special_affix_count = sum(
+            1 for mod in mods if mod.mod_type in ("fractured", "desecrated"))
+
         # Grade assignment
         grade = self._assign_grade(normalized, key_mods, high_tier_key,
-                                   total_mods=len(mod_scores))
+                                   total_mods=len(mod_scores),
+                                   special_affix_count=special_affix_count)
 
         # Build summary of top mods
         top = sorted(mod_scores, key=lambda m: m.weighted_score, reverse=True)
         summary_parts = []
         for ms in top[:3]:
             if ms.tier_label and ms.mod_group:
-                short_group = ms.mod_group
-                # Shorten common group names
-                for prefix in ("Increased", "Local", "Added"):
-                    if short_group.startswith(prefix):
-                        short_group = short_group[len(prefix):]
-                        break
-                summary_parts.append(f"{ms.tier_label} {short_group}")
+                short = _display_name(ms.mod_group)
+                summary_parts.append(f"{ms.tier_label} {short}")
         top_mods_summary = ", ".join(summary_parts) if summary_parts else ""
 
         return ItemScore(
@@ -385,6 +637,11 @@ class ModDatabase:
             suffix_count=suffix_count,
             mod_scores=mod_scores,
             top_mods_summary=top_mods_summary,
+            top_tier_count=len(valuable_top_tier),
+            dps_factor=round(d_factor, 3),
+            defense_factor=round(a_factor, 3),
+            total_dps=round(total_dps, 1),
+            total_defense=total_defense,
         )
 
     def get_tier_info(self, stat_id: str, value: float,
@@ -526,10 +783,10 @@ class ModDatabase:
             return
 
         # Build lookup: normalized_text → (group, generation_type, mod_key)
-        # from RePoE mods.  Only craftable item mods.
+        # from RePoE mods.  Item + misc domains (misc includes jewel mods).
         repoe_lookup: Dict[str, Tuple[str, str, str]] = {}
         for mod_key, mod_data in self._mods_data.items():
-            if mod_data.get("domain") != "item":
+            if mod_data.get("domain") not in ("item", "misc"):
                 continue
             gen_type = mod_data.get("generation_type", "")
             if gen_type not in ("prefix", "suffix"):
@@ -789,6 +1046,18 @@ class ModDatabase:
             # No bridge entry — use common/key classification
             weight = 0.3 if _is_common_mod(mod.raw_text) else 2.0
 
+        # Fractured/desecrated mods are inherently premium: permanent (can't
+        # reroll) and rare.  Boost their weight to reflect this.
+        if mod.mod_type in ("fractured", "desecrated"):
+            weight = max(weight, 2.0)  # at least Key-tier weight
+            percentile = max(percentile, 0.85)  # treat as high-roll
+
+        # Percentile floor for key/premium mods: even a low-tier roll of a
+        # premium mod type is valuable because the mod's PRESENCE matters.
+        # E.g. T8 spell damage on a staff is still spell damage.
+        if weight >= 2.0:
+            percentile = max(percentile, 0.30)
+
         # Key mod: weight >= 1.0.  When group is known, trust the weight
         # table (Life is weight 1.0 despite matching common patterns).
         # When group is unknown, defer to the common pattern check.
@@ -812,7 +1081,8 @@ class ModDatabase:
     @staticmethod
     def _assign_grade(normalized: float, key_mods: list,
                       high_tier_key: list,
-                      total_mods: int = 0) -> Grade:
+                      total_mods: int = 0,
+                      special_affix_count: int = 0) -> Grade:
         """Assign grade from normalized score + mod composition.
 
         | Grade | Criteria |
@@ -822,6 +1092,14 @@ class ModDatabase:
         | B | normalized >= 0.45 AND 2+ key mods |
         | C | normalized >= 0.30 OR 1+ key mods |
         | JUNK | everything else |
+
+        Special affixes (fractured/desecrated) lower thresholds by 0.10
+        per affix — these mods are permanent and rare, making the item
+        inherently more valuable than its raw percentile suggests.
+
+        Many key mods (4+) lower thresholds because having multiple
+        premium mod types on one item is inherently rare and valuable,
+        even if individual rolls are mediocre.
 
         No key mods at all -> JUNK regardless of score.
         Items with <2 mods can't be S-tier, <2 can't be A-tier (prevents
@@ -833,13 +1111,20 @@ class ModDatabase:
         n_high = len(high_tier_key)
         n_key = len(key_mods)
 
-        if n_high >= 2 and normalized >= 0.75 and total_mods >= 3:
+        # Special affixes lower score thresholds (0.10 per affix, max 0.20)
+        bonus = min(special_affix_count * 0.10, 0.20)
+        # Many key mods (3+) further lower thresholds — having multiple
+        # premium mod types on one item is inherently rare and valuable.
+        if n_key >= 3:
+            bonus += min((n_key - 2) * 0.05, 0.15)
+
+        if n_high >= 2 and normalized >= (0.75 - bonus) and total_mods >= 3:
             return Grade.S
-        if n_high >= 1 and normalized >= 0.60 and total_mods >= 2:
+        if n_high >= 1 and normalized >= (0.60 - bonus) and total_mods >= 2:
             return Grade.A
-        if normalized >= 0.45 and n_key >= 2:
+        if normalized >= (0.45 - bonus) and n_key >= 2:
             return Grade.B
-        if normalized >= 0.30 or n_key >= 1:
+        if normalized >= (0.30 - bonus) or n_key >= 1:
             return Grade.C
         return Grade.JUNK
 
@@ -958,7 +1243,7 @@ if __name__ == "__main__":
         return ParsedMod(raw_text=raw or name, stat_id=sid,
                          value=value, mod_type="explicit")
 
-    def item(name, base, cls, ilvl=80):
+    def item(name, base, cls, ilvl=80, total_dps=0.0, total_defense=0):
         """Shorthand to create a ParsedItem."""
         it = ParsedItem()
         it.name = name
@@ -966,6 +1251,8 @@ if __name__ == "__main__":
         it.item_class = cls
         it.rarity = "rare"
         it.item_level = ilvl
+        it.total_dps = total_dps
+        it.total_defense = total_defense
         return it
 
     # ── Test Cases ────────────────────────────────────
@@ -1176,6 +1463,44 @@ if __name__ == "__main__":
          [mod("es", 80, "+80 to maximum Energy Shield"),
           mod("spirit", 25, "+25 to Spirit"),
           mod("cast_spd", 20, "20% increased Cast Speed")]),
+
+        # ── DPS/Defense Factor Tests ─────────────────
+        ("D1: Low DPS bow (100 dps, ilvl 80) — crushed to JUNK",
+         {"JUNK", "C"},
+         item("Trash Bow", "Recurve Bow", "Bows", ilvl=80, total_dps=100),
+         [mod("%phys", 170, "170% increased Physical Damage"),
+          mod("phys_dmg", 50, "Adds 30 to 50 Physical Damage"),
+          mod("crit_chance", 35, "35% increased Critical Hit Chance"),
+          mod("atk_spd", 24, "24% increased Attack Speed")]),
+
+        ("D2: Good DPS bow (400 dps, ilvl 80) — grade unchanged",
+         {"S", "A"},
+         item("Storm Thirst", "Recurve Bow", "Bows", ilvl=80, total_dps=400),
+         [mod("%phys", 170, "170% increased Physical Damage"),
+          mod("phys_dmg", 50, "Adds 30 to 50 Physical Damage"),
+          mod("crit_chance", 35, "35% increased Critical Hit Chance"),
+          mod("atk_spd", 24, "24% increased Attack Speed")]),
+
+        ("D3: Low defense body armour (150 total) — penalized",
+         {"C", "JUNK"},
+         item("Weak Plate", "Full Plate", "Body Armours", total_defense=150),
+         [mod("life", 70, "+70 to maximum Life"),
+          mod("armour", 200, "+200 to Armour"),
+          mod("fire_res", 28, "+28% to Fire Resistance")]),
+
+        ("D4: Wand — DPS factor = 1.0 (excluded from DPS scoring)",
+         {"B", "C", "A"},
+         item("Caster Wand", "Bone Wand", "Wands", total_dps=50),
+         [mod("spell_dmg", 55, "55% increased Spell Damage"),
+          mod("cast_spd", 14, "14% increased Cast Speed"),
+          mod("mana", 50, "+50 to maximum Mana")]),
+
+        ("D5: Ring — both factors = 1.0 (excluded from both)",
+         {"S", "A"},
+         item("Plain Ring", "Ruby Ring", "Rings", total_dps=0, total_defense=0),
+         [mod("crit_multi", 38, "38% increased Critical Damage Bonus"),
+          mod("life", 70, "+70 to maximum Life"),
+          mod("lightning_res", 30, "+30% to Lightning Resistance")]),
     ]
 
     # ── Run Tests ─────────────────────────────────────
@@ -1202,10 +1527,15 @@ if __name__ == "__main__":
 
         # Compact output
         mods_summary = score.top_mods_summary or "(no mods)"
+        combat = ""
+        if score.dps_factor != 1.0:
+            combat += f"  dps_f={score.dps_factor:.2f}"
+        if score.defense_factor != 1.0:
+            combat += f"  def_f={score.defense_factor:.2f}"
         print(f"\n  [{status}] {desc}")
         print(f"         Grade={grade_str} (expected {'/'.join(sorted(expected_grades))})"
               f"  score={score.normalized_score:.3f}"
-              f"  P={score.prefix_count} S={score.suffix_count}")
+              f"  P={score.prefix_count} S={score.suffix_count}{combat}")
         print(f"         {mods_summary}")
 
         if not ok:
@@ -1231,6 +1561,41 @@ if __name__ == "__main__":
                           f"range {info.stat_min:.0f}-{info.stat_max:.0f}")
                 else:
                     print(f"    +{v} Life -> {label or '?'} (no tier info)")
+
+    # ── DPS/Defense Factor Diagnostics ───────────────
+    print(f"\n{'='*70}")
+    print(f"  DPS/Defense Factor Diagnostics")
+    print(f"{'='*70}")
+
+    print("\n  DPS factors (Bows, 2H, ilvl 80):")
+    for dps_val in [50, 100, 150, 250, 400, 600, 800]:
+        f = _dps_factor(dps_val, "Bows", 80)
+        print(f"    {dps_val:>4} DPS -> factor {f:.3f}")
+
+    print("\n  DPS factors (One Hand Swords, 1H, ilvl 80):")
+    for dps_val in [30, 80, 150, 250, 400, 500]:
+        f = _dps_factor(dps_val, "One Hand Swords", 80)
+        print(f"    {dps_val:>4} DPS -> factor {f:.3f}")
+
+    print("\n  DPS factors (Wands — excluded):")
+    for dps_val in [50, 100, 200]:
+        f = _dps_factor(dps_val, "Wands", 80)
+        print(f"    {dps_val:>4} DPS -> factor {f:.3f}")
+
+    print("\n  Defense factors (Body Armours):")
+    for def_val in [100, 200, 400, 700, 1000, 1200]:
+        f = _defense_factor(def_val, "Body Armours")
+        print(f"    {def_val:>4} def -> factor {f:.3f}")
+
+    print("\n  Defense factors (Gloves):")
+    for def_val in [50, 80, 160, 280, 400, 500]:
+        f = _defense_factor(def_val, "Gloves")
+        print(f"    {def_val:>4} def -> factor {f:.3f}")
+
+    print("\n  Defense factors (Rings — excluded):")
+    for def_val in [50, 100]:
+        f = _defense_factor(def_val, "Rings")
+        print(f"    {def_val:>4} def -> factor {f:.3f}")
 
     # ── Summary ───────────────────────────────────────
     print(f"\n{'='*70}")

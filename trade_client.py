@@ -28,6 +28,10 @@ from config import (
     TRADE_CACHE_TTL,
     TRADE_MOD_MIN_MULTIPLIER,
     DEFAULT_LEAGUE,
+    DPS_ITEM_CLASSES,
+    DEFENSE_ITEM_CLASSES,
+    TRADE_DPS_FILTER_MULT,
+    TRADE_DEFENSE_FILTER_MULT,
 )
 from mod_parser import ParsedMod
 
@@ -111,8 +115,12 @@ class TradeClient:
             or any(m.mod_type in ("fractured", "desecrated") for m in mods)
         )
 
-        # Check cache (includes quality and sockets in fingerprint)
-        fingerprint = self._make_fingerprint(base_type, mods, quality, sockets)
+        # Check cache (includes quality, sockets, DPS, defense in fingerprint)
+        total_dps = getattr(item, 'total_dps', 0.0) or 0.0
+        total_defense = getattr(item, 'total_defense', 0) or 0
+        fingerprint = self._make_fingerprint(
+            base_type, mods, quality, sockets,
+            dps=total_dps, defense=total_defense)
         cached = self._check_cache(fingerprint)
         if cached:
             logger.debug(f"TradeClient: cache hit for {base_type}")
@@ -147,14 +155,29 @@ class TradeClient:
                     f"TradeClient: mod [{m.mod_type}] {m.raw_text} "
                     f"→ {m.stat_id} (val={m.value})")
 
+            # Compute DPS/defense filters for trade API
+            item_class = getattr(item, 'item_class', '') or ''
+            dps_min = 0
+            defense_mins = {}
+            if item_class in DPS_ITEM_CLASSES:
+                tdps = getattr(item, 'total_dps', 0.0) or 0.0
+                if tdps > 0:
+                    dps_min = tdps * TRADE_DPS_FILTER_MULT
+            if item_class in DEFENSE_ITEM_CLASSES:
+                for attr, key in [('armour', 'ar'), ('evasion', 'ev'), ('energy_shield', 'es')]:
+                    val = getattr(item, attr, 0) or 0
+                    if val > 0:
+                        defense_mins[key] = int(val * TRADE_DEFENSE_FILTER_MULT)
+
             if has_value_signals:
                 # Niche items (fractured/desecrated/3S): quick probe with
                 # specific base type (1 call), then broad count(n-1) without
                 # base type (up to 3 calls).  Total max 4 — stays well under
                 # the API's rate limit window.
-                search_result, exact_match = self._search_progressive(
+                search_result, exact_match, mods_dropped = self._search_progressive(
                     base_type, stat_filters, priceable, quality=quality,
                     sockets=sockets, is_stale=is_stale, max_calls=1,
+                    dps_min=dps_min, defense_mins=defense_mins,
                 )
 
                 if not search_result:
@@ -181,7 +204,8 @@ class TradeClient:
                             priceable, mult)
                         query = self._build_query(
                             None, filters_at, "count", min_count,
-                            quality=quality, sockets=sockets)
+                            quality=quality, sockets=sockets,
+                            dps_min=dps_min, defense_mins=defense_mins)
                         result = self._do_search(query)
                         pct = int(mult * 100)
                         if result and result.get("result"):
@@ -191,15 +215,17 @@ class TradeClient:
                                 f"@{pct}% = {total} results")
                             search_result = result
                             exact_match = False
+                            mods_dropped = n - min_count
                             break
                         logger.info(
                             f"TradeClient: broad count({min_count}/{n}) "
                             f"@{pct}% = 0 results")
             else:
                 # Normal items: full progressive search + socket fallback.
-                search_result, exact_match = self._search_progressive(
+                search_result, exact_match, mods_dropped = self._search_progressive(
                     base_type, stat_filters, priceable, quality=quality,
                     sockets=sockets, is_stale=is_stale,
+                    dps_min=dps_min, defense_mins=defense_mins,
                 )
 
                 if not search_result and sockets > 0:
@@ -212,9 +238,10 @@ class TradeClient:
                     logger.info(
                         f"TradeClient: no results with {sockets} sockets, "
                         f"retrying without socket filter")
-                    search_result, exact_match = self._search_progressive(
+                    search_result, exact_match, mods_dropped = self._search_progressive(
                         base_type, stat_filters, priceable, quality=quality,
                         sockets=0, is_stale=is_stale, max_calls=3,
+                        dps_min=dps_min, defense_mins=defense_mins,
                     )
 
             if not search_result:
@@ -249,15 +276,34 @@ class TradeClient:
                 return None
 
             # Extract prices and build result.
-            # When mods were dropped to find results, comparables are
-            # strictly worse than the actual item — use upper prices.
+            # When 1 mod is dropped, comparables are slightly worse than
+            # the actual item — use upper prices as a floor estimate.
+            # When 2+ mods are dropped, comparables may be much BETTER
+            # (they have their own amazing mods in the dropped slots),
+            # so don't inflate — use conservative regular pricing.
             is_estimate = not exact_match
-            result = self._build_result(
-                listings, total, lower_bound=is_estimate)
+            if mods_dropped >= 2:
+                # Many mods dropped — comparables aren't representative.
+                # With few results, they're extreme outliers (god-tier items
+                # that happen to share some mods). Suppress entirely.
+                if total < 8:
+                    logger.info(
+                        f"TradeClient: suppressing estimate — {mods_dropped} "
+                        f"mods dropped, only {total} results (not representative)")
+                    return None
+                # With enough results, use regular pricing (no inflation)
+                logger.info(
+                    f"TradeClient: {mods_dropped} mods dropped — using "
+                    f"conservative pricing (no lower_bound inflation)")
+                result = self._build_result(
+                    listings, total, lower_bound=False)
+            else:
+                result = self._build_result(
+                    listings, total, lower_bound=is_estimate)
             if is_estimate and result:
                 logger.info(
-                    f"TradeClient: no exact match — showing conservative "
-                    f"estimate from similar items missing 1+ mod")
+                    f"TradeClient: estimate from similar items "
+                    f"(dropped {mods_dropped} mod(s))")
             if result:
                 self._put_cache(fingerprint, result)
                 logger.info(
@@ -346,6 +392,112 @@ class TradeClient:
                 min_price=0, max_price=0, num_results=0,
                 display="?", tier="low",
             )
+
+    def price_unique_item(self, item, is_stale=None) -> Optional[RarePriceResult]:
+        """Price a corrupted unique item by name + sockets via the trade API.
+
+        Used for corrupted uniques where Vaal outcomes (rerolled mods, added
+        sockets) significantly affect value compared to the static base price.
+        """
+        name = item.name
+        base_type = item.base_type or ""
+        sockets = getattr(item, "sockets", 0) or 0
+
+        if not name:
+            return None
+
+        cache_key = f"unique:{name}:{sockets}"
+        cached = self._check_cache(cache_key)
+        if cached:
+            logger.debug(f"TradeClient: cache hit for unique {name}")
+            return cached
+
+        try:
+            if self._is_rate_limited():
+                wait = int(self._rate_limited_until - time.time())
+                return RarePriceResult(
+                    min_price=0, max_price=0, num_results=0,
+                    display=f"Rate limited ({wait}s)", tier="low",
+                )
+
+            logger.info(
+                f"TradeClient: pricing unique {name} "
+                f"(corrupted, sockets={sockets})"
+            )
+
+            query = self._build_unique_query(name, base_type, sockets)
+
+            if is_stale and is_stale():
+                return None
+
+            search_result = self._do_search(query)
+            if not search_result:
+                return None
+
+            query_id = search_result.get("id")
+            result_ids = search_result.get("result", [])
+            total = search_result.get("total", 0)
+
+            if not query_id or not result_ids:
+                return None
+
+            if is_stale and is_stale():
+                return None
+
+            fetch_ids = result_ids[:TRADE_RESULT_COUNT]
+            listings = self._do_fetch(query_id, fetch_ids)
+            if not listings:
+                return None
+
+            result = self._build_result(listings, total)
+            if result:
+                self._put_cache(cache_key, result)
+                logger.info(
+                    f"UNIQUE PRICE {name} ({sockets}S corrupted): "
+                    f"{result.display} ({result.num_results} results)"
+                )
+            return result
+
+        except Exception as e:
+            logger.warning(f"TradeClient: unique pricing failed for {name}: {e}")
+            return RarePriceResult(
+                min_price=0, max_price=0, num_results=0,
+                display="?", tier="low",
+            )
+
+    def _build_unique_query(self, name: str, base_type: str,
+                            sockets: int = 0) -> dict:
+        """Build a trade API query for a corrupted unique by name + sockets."""
+        filters = {
+            "type_filters": {
+                "filters": {
+                    "rarity": {"option": "unique"},
+                }
+            },
+            "misc_filters": {
+                "filters": {
+                    "corrupted": {"option": "true"},
+                },
+            },
+        }
+
+        if sockets > 0:
+            filters["equipment_filters"] = {
+                "filters": {
+                    "rune_sockets": {"min": sockets},
+                },
+            }
+
+        query_inner = {
+            "status": {"option": "any"},
+            "name": name,
+            "stats": [{"type": "and", "filters": []}],
+            "filters": filters,
+        }
+        if base_type:
+            query_inner["type"] = base_type
+
+        return {"query": query_inner, "sort": {"price": "asc"}}
 
     def _build_base_query(self, base_type: str, sockets: int = 0,
                           item_level: int = 0) -> dict:
@@ -453,13 +605,16 @@ class TradeClient:
 
     def _build_query(self, base_type: str, stat_filters: list,
                      match_mode: str = "and", min_count: int = 0,
-                     quality: int = 0, sockets: int = 0) -> dict:
+                     quality: int = 0, sockets: int = 0,
+                     dps_min: float = 0, defense_mins: dict = None) -> dict:
         """Build a trade API search query.
 
         Args:
             match_mode: "and" (all must match) or "count" (at least min_count)
             quality: item quality — included as a min filter when > 0
             sockets: minimum rune sockets — included when > 0
+            dps_min: minimum total DPS — included when > 0
+            defense_mins: dict of defense minimums (ar/ev/es) — included when > 0
         """
         if match_mode == "count" and min_count > 0:
             stat_group = {"type": "count", "value": {"min": min_count},
@@ -484,12 +639,18 @@ class TradeClient:
             },
         }
 
+        # Equipment filters: sockets + DPS + defense
+        equip_filters = {}
         if sockets > 0:
-            filters["equipment_filters"] = {
-                "filters": {
-                    "rune_sockets": {"min": sockets},
-                },
-            }
+            equip_filters["rune_sockets"] = {"min": sockets}
+        if dps_min > 0:
+            equip_filters["dps"] = {"min": int(dps_min)}
+        if defense_mins:
+            for key in ("ar", "ev", "es"):
+                if defense_mins.get(key, 0) > 0:
+                    equip_filters[key] = {"min": defense_mins[key]}
+        if equip_filters:
+            filters["equipment_filters"] = {"filters": equip_filters}
 
         query_inner = {
             "status": {"option": "any"},
@@ -502,7 +663,8 @@ class TradeClient:
 
     def _build_hybrid_query(self, base_type, key_filters: list,
                             common_filters: list, min_common: int,
-                            quality: int = 0, sockets: int = 0) -> dict:
+                            quality: int = 0, sockets: int = 0,
+                            dps_min: float = 0, defense_mins: dict = None) -> dict:
         """Build a query with key mods as "and" + common mods as "count".
 
         This ensures price-driving mods always match while allowing
@@ -537,12 +699,18 @@ class TradeClient:
             },
         }
 
+        # Equipment filters: sockets + DPS + defense
+        equip_filters = {}
         if sockets > 0:
-            filters["equipment_filters"] = {
-                "filters": {
-                    "rune_sockets": {"min": sockets},
-                },
-            }
+            equip_filters["rune_sockets"] = {"min": sockets}
+        if dps_min > 0:
+            equip_filters["dps"] = {"min": int(dps_min)}
+        if defense_mins:
+            for key in ("ar", "ev", "es"):
+                if defense_mins.get(key, 0) > 0:
+                    equip_filters[key] = {"min": defense_mins[key]}
+        if equip_filters:
+            filters["equipment_filters"] = {"filters": equip_filters}
 
         query_inner = {
             "status": {"option": "any"},
@@ -623,22 +791,28 @@ class TradeClient:
     def _search_progressive(self, base_type: str, stat_filters: list,
                             priceable: List[ParsedMod] = None,
                             quality: int = 0, sockets: int = 0,
-                            is_stale=None, max_calls: int = 6):
+                            is_stale=None, max_calls: int = 6,
+                            dps_min: float = 0, defense_mins: dict = None):
         """Find the best price query using minimal API calls.
 
         Args:
             max_calls: Maximum number of _do_search invocations allowed.
                 Prevents niche items from burning through the rate limit.
                 Default 6 covers the most productive search steps.
+            dps_min: minimum total DPS filter
+            defense_mins: dict of defense minimums (ar/ev/es)
 
         Returns:
-            (search_result, exact_match) tuple.
+            (search_result, exact_match, mods_dropped) tuple.
             exact_match is True when ALL mods matched (count n/n or "and"),
             False when mods were dropped (comparables are worse than actual item).
-            Returns (None, False) when no results found.
+            mods_dropped is the number of mods removed from the query.
+            Returns (None, False, 0) when no results found.
         """
         q = quality
         s = sockets
+        dm = dps_min
+        df = defense_mins
         calls_remaining = max_calls
 
         def _budget_search(query):
@@ -664,24 +838,26 @@ class TradeClient:
             # try tight match first so we compare against similar quality.
             if n <= 2 and priceable:
                 tight = self._build_stat_filters_custom(priceable, 0.98)
-                query = self._build_query(base_type, tight, quality=q, sockets=s)
+                query = self._build_query(base_type, tight, quality=q, sockets=s,
+                                          dps_min=dm, defense_mins=df)
                 result = _budget_search(query)
                 if result and result.get("result"):
                     logger.info(
                         f"TradeClient: tight match @98% "
                         f"({result.get('total', 0)} results)")
-                    return result, True
+                    return result, True, 0
                 if _stale():
-                    return None, False
+                    return None, False, 0
 
-            query = self._build_query(base_type, stat_filters, quality=q, sockets=s)
+            query = self._build_query(base_type, stat_filters, quality=q, sockets=s,
+                                      dps_min=dm, defense_mins=df)
             result = _budget_search(query)
             if result and result.get("result"):
                 logger.info(
                     f"TradeClient: exact match ({result.get('total', 0)} results)")
-                return result, True
+                return result, True, 0
             if _stale():
-                return None, False
+                return None, False, 0
 
             # For socketed items: try key mods + sockets (drop common mods).
             # E.g., 2-socket boots with 35% MS — the sockets + key mod drive value,
@@ -691,27 +867,29 @@ class TradeClient:
                     priceable, stat_filters)
                 if key_f and common_f:
                     query = self._build_query(
-                        base_type, key_f, quality=q, sockets=s)
+                        base_type, key_f, quality=q, sockets=s,
+                        dps_min=dm, defense_mins=df)
                     result = _budget_search(query)
                     if result and result.get("result"):
                         logger.info(
                             f"TradeClient: key mods + {s}S "
                             f"({result.get('total', 0)} results)")
-                        return result, False  # dropped common mods → estimate
+                        return result, False, len(common_f)
                     if _stale():
-                        return None, False
+                        return None, False, 0
 
             # Fall through to count for small sets too
             if n >= 3:
                 query = self._build_query(
-                    base_type, stat_filters, "count", n - 1, quality=q, sockets=s)
+                    base_type, stat_filters, "count", n - 1, quality=q, sockets=s,
+                    dps_min=dm, defense_mins=df)
                 result = _budget_search(query)
                 if result and result.get("result"):
                     logger.info(
                         f"TradeClient: count({n-1}/{n}) = "
                         f"{result.get('total', 0)} results")
-                    return result, False
-            return None, False
+                    return result, False, 1
+            return None, False, 0
 
         # For 5+ mods: use a multi-group strategy that preserves key mods.
 
@@ -745,16 +923,17 @@ class TradeClient:
         # match exists at 90%, that's the best price.
         tight_filters = self._build_stat_filters_custom(priceable, 0.90)
         query = self._build_query(
-            base_type, tight_filters, "count", n, quality=q, sockets=s)
+            base_type, tight_filters, "count", n, quality=q, sockets=s,
+            dps_min=dm, defense_mins=df)
         result = _budget_search(query)
         if result and result.get("result"):
             total = result.get("total", 0)
             logger.info(f"TradeClient: count({n}/{n}) @90% = {total} results")
             if total <= self._TOO_MANY_RESULTS:
-                return result, not low_key_confidence  # exact unless low confidence
+                return result, not low_key_confidence, 0
 
         if _stale():
-            return None, False
+            return None, False, 0
 
         # Step 2 (NEW): Hybrid query — key mods as "and" (always required)
         # + common mods as "count" (allow some to be absent).
@@ -763,7 +942,8 @@ class TradeClient:
             # Try all common mods first
             query = self._build_hybrid_query(
                 base_type, key_filters, common_filters,
-                min_common=n_common, quality=q, sockets=s)
+                min_common=n_common, quality=q, sockets=s,
+                dps_min=dm, defense_mins=df)
             result = _budget_search(query)
             if result and result.get("result"):
                 total = result.get("total", 0)
@@ -772,16 +952,17 @@ class TradeClient:
                     f"common>={n_common} = {total} results"
                 )
                 if total <= self._TOO_MANY_RESULTS:
-                    return result, not low_key_confidence
+                    return result, not low_key_confidence, 0
 
             if _stale():
-                return None, False
+                return None, False, 0
 
             # Drop 1 common mod
             if n_common >= 2:
                 query = self._build_hybrid_query(
                     base_type, key_filters, common_filters,
-                    min_common=n_common - 1, quality=q, sockets=s)
+                    min_common=n_common - 1, quality=q, sockets=s,
+                    dps_min=dm, defense_mins=df)
                 result = _budget_search(query)
                 if result and result.get("result"):
                     total = result.get("total", 0)
@@ -790,10 +971,10 @@ class TradeClient:
                         f"common>={n_common - 1} = {total} results"
                     )
                     if total <= self._TOO_MANY_RESULTS:
-                        return result, False  # dropped a common — lower bound
+                        return result, False, 1
 
                 if _stale():
-                    return None, False
+                    return None, False, 0
 
         # Step 3: count(n-1) at progressively looser minimums.
         # Results are LOWER BOUNDS — items are missing one mod, so the
@@ -804,7 +985,8 @@ class TradeClient:
                 break
             filters_at = self._build_stat_filters_custom(priceable, mult)
             query = self._build_query(
-                base_type, filters_at, "count", n - 1, quality=q, sockets=s)
+                base_type, filters_at, "count", n - 1, quality=q, sockets=s,
+                dps_min=dm, defense_mins=df)
             result = _budget_search(query)
             if result and result.get("result"):
                 total = result.get("total", 0)
@@ -812,22 +994,27 @@ class TradeClient:
                 logger.info(
                     f"TradeClient: count({n-1}/{n}) @{pct}% = {total} results")
                 if total <= self._TOO_MANY_RESULTS:
-                    return result, False  # mods dropped — lower bound
+                    return result, False, 1
                 # Too many — use as best so far, stop loosening
                 if best is None:
                     best = result
                 break
 
         if best:
-            return best, False
+            return best, False, 1
 
         # Step 4: count(n-2), count(n-3), ... with standard minimums
+        # These drop 2+ mods — comparables may be much better than actual
+        # item, so mods_dropped is tracked for conservative pricing.
         floor = max(2, n // 2)
+        best_dropped = 0
         for min_count in range(n - 2, floor - 1, -1):
             if _stale() or calls_remaining <= 0:
                 break
+            dropped = n - min_count
             query = self._build_query(
-                base_type, stat_filters, "count", min_count, quality=q, sockets=s)
+                base_type, stat_filters, "count", min_count, quality=q, sockets=s,
+                dps_min=dm, defense_mins=df)
             result = _budget_search(query)
             if not result or not result.get("result"):
                 continue
@@ -836,17 +1023,18 @@ class TradeClient:
             logger.info(f"TradeClient: count({min_count}/{n}) = {total} results")
 
             if total <= self._TOO_MANY_RESULTS:
-                return result, False
+                return result, False, dropped
 
             if best is None:
                 best = result
+                best_dropped = dropped
             break
 
         if best:
-            return best, False
+            return best, False, best_dropped
 
         logger.info(f"TradeClient: all queries returned 0 for {base_type}")
-        return None, False
+        return None, False, 0
 
     # ─── API Calls ────────────────────────────────
 
@@ -1252,13 +1440,18 @@ class TradeClient:
     # ─── Caching ──────────────────────────────────
 
     def _make_fingerprint(self, base_type: str, mods: List[ParsedMod],
-                          quality: int = 0, sockets: int = 0) -> str:
-        """Create a cache key from base type, mods, quality, and sockets."""
+                          quality: int = 0, sockets: int = 0,
+                          dps: float = 0, defense: int = 0) -> str:
+        """Create a cache key from base type, mods, quality, sockets, and combat stats."""
         parts = [base_type.lower()]
         if quality > 0:
             parts.append(f"q{quality}")
         if sockets > 0:
             parts.append(f"s{sockets}")
+        if dps > 0:
+            parts.append(f"dps{int(dps)}")
+        if defense > 0:
+            parts.append(f"def{defense}")
         for mod in sorted(mods, key=lambda m: m.stat_id):
             # Round values to reduce cache misses for similar items
             rounded = round(mod.value / 5) * 5
