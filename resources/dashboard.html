@@ -56,6 +56,51 @@
     .window-btn:hover { background: rgba(196,164,86,0.12); color: #c4a456; }
     .window-btn-close:hover { background: rgba(200,50,50,0.4); color: #ff6666; }
 
+    /* Footer branding */
+    .app-footer {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 6px 16px;
+      flex-shrink: 0;
+      user-select: none;
+      border-top: 1px solid rgba(107,90,62,0.3);
+    }
+    .footer-email {
+      font-size: 10px;
+      color: #5c4f3d;
+      text-decoration: none;
+      transition: color 0.15s;
+      letter-spacing: 0.03em;
+    }
+    .footer-email:hover { color: #c4a456; }
+
+    /* Couloir flyout */
+    @keyframes flyoutIn {
+      from { opacity: 0; transform: translateY(8px) scale(0.97); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .couloir-flyout {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      right: 0;
+      width: 340px;
+      background: #141110;
+      border: 1px solid #6b5a3e;
+      border-radius: 10px;
+      box-shadow: 0 -4px 30px rgba(0,0,0,0.6), 0 0 0 1px rgba(196,164,86,0.08);
+      padding: 20px;
+      animation: flyoutIn 0.25s ease-out;
+      z-index: 100;
+    }
+    .couloir-flyout-link {
+      color: #8c7a5c;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .couloir-flyout-link:hover { color: #c4a456; }
+
     /* Gold header divider */
     .gold-divider {
       position: relative; height: 1px;
@@ -505,6 +550,112 @@
             <button className="window-btn" onClick={toggleMax}>&#9633;</button>
             <button className="window-btn window-btn-close" onClick={close}>&#10005;</button>
           </div>
+        </div>
+      );
+    }
+
+    // Brand Footer
+    // -----------------------------------------------------------------------
+    function BrandFooter() {
+      const [flyoutOpen, setFlyoutOpen] = useState(false);
+      const flyoutRef = useRef(null);
+
+      useEffect(() => {
+        if (!flyoutOpen) return;
+        const handleClick = (e) => {
+          if (flyoutRef.current && !flyoutRef.current.contains(e.target)) setFlyoutOpen(false);
+        };
+        document.addEventListener("mousedown", handleClick);
+        return () => document.removeEventListener("mousedown", handleClick);
+      }, [flyoutOpen]);
+
+      return (
+        <div className="app-footer" style={{ position: "relative" }} ref={flyoutRef}>
+          <a className="footer-email" href="mailto:hello@couloir.gg">hello@couloir.gg</a>
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#5c4f3d", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            Couloir
+          </span>
+          <img
+            src="/img/couloir_avatar.png"
+            alt="Couloir"
+            onClick={() => setFlyoutOpen(!flyoutOpen)}
+            style={{
+              width: 22, height: 22, borderRadius: 4, cursor: "pointer",
+              filter: flyoutOpen
+                ? "sepia(0.3) saturate(1.5) brightness(1.0) hue-rotate(-5deg)"
+                : "sepia(0.6) saturate(1.2) brightness(0.8) hue-rotate(-5deg)",
+              opacity: flyoutOpen ? 1 : 0.7,
+              transition: "filter 0.2s, opacity 0.2s",
+            }}
+          />
+          {flyoutOpen && (
+            <div className="couloir-flyout">
+              {/* Header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                <img
+                  src="/img/couloir_avatar.png"
+                  alt="Couloir"
+                  style={{
+                    width: 40, height: 40, borderRadius: 6,
+                    filter: "sepia(0.4) saturate(1.4) brightness(0.85) hue-rotate(-5deg)",
+                  }}
+                />
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.gold, letterSpacing: "0.06em" }}>
+                    Who We Are
+                  </div>
+                  <div style={{ fontSize: 10, color: T.textMuted, marginTop: 1 }}>indie studio</div>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div style={{
+                height: 1, margin: "0 0 14px",
+                background: `linear-gradient(90deg, ${T.borderGold}, transparent)`,
+              }} />
+
+              {/* Body */}
+              <div style={{ fontSize: 12, color: T.textSecond, lineHeight: 1.65 }}>
+                <span style={{ color: T.gold }}>Couloir</span> is a small indie studio that builds
+                open-source games and developer tools. We believe the best software is free,
+                transparent, and community-driven.
+              </div>
+              <div style={{ fontSize: 12, color: T.textSecond, lineHeight: 1.65, marginTop: 10 }}>
+                This tool exists because we love this game, its community, and especially
+                GGG — we know how hard it is to build games and ship every feature players
+                want. We took the ideas we loved from other tools and put them in one place,
+                for free. It's <span style={{ color: T.text, fontWeight: 600 }}>GPLv3</span> —
+                the code is yours. Fork it, improve it, break it, whatever.
+                No tracking, no telemetry, no third-party ads. <span style={{ color: T.text, fontWeight: 600 }}>Ever.</span>
+              </div>
+              <div style={{ fontSize: 12, color: T.textSecond, lineHeight: 1.65, marginTop: 10 }}>
+                If it supports GGG's goals and helps players, we hit the mark. If it saves
+                you time or currency, consider supporting us so we can keep building.
+              </div>
+
+              {/* Divider */}
+              <div style={{
+                height: 1, margin: "14px 0",
+                background: `linear-gradient(90deg, ${T.borderGold}, transparent)`,
+              }} />
+
+              {/* Links */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 11 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span>&#9924;</span>
+                  <span style={{ color: T.textSecond }}>Built by <span style={{ color: T.text, fontWeight: 600 }}>Cal Schuss</span> & friends</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span>&#9993;</span>
+                  <a className="couloir-flyout-link" href="mailto:hello@couloir.gg">hello@couloir.gg</a>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span>&#127760;</span>
+                  <a className="couloir-flyout-link" href="https://couloir.gg" target="_blank" rel="noopener noreferrer">couloir.gg</a>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -2604,6 +2755,7 @@
           <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} version={status.version} />
         </div>
         </div>
+        <BrandFooter />
         </div>
       );
     }
