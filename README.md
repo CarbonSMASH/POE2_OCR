@@ -158,7 +158,7 @@ POE2_OCR/
 │   ├── test_trade_client.py
 │   └── fixtures/          # Real clipboard captures for tests
 └── docs/                  # Developer documentation
-    ├── CLAUDE_CODE_HANDOFF.md
+    ├── DEVELOPER_HANDOFF.md
     └── TODO.md
 ```
 
