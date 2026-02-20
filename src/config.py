@@ -254,11 +254,11 @@ LOG_FILE = Path(os.path.expanduser("~")) / ".poe2-price-overlay" / "overlay.log"
 # ─────────────────────────────────────────────
 # Bug Reporting (Discord webhook)
 # ─────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = ""
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 # Market Signals — Discord integration (coming soon)
-DISCORD_SIGNALS_CHANNEL_ID = ""  # Discord channel ID for #market-signals
-DISCORD_BOT_TOKEN = ""           # Bot token for reading messages
+DISCORD_SIGNALS_CHANNEL_ID = os.environ.get("DISCORD_SIGNALS_CHANNEL_ID", "")
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 BUG_REPORT_LOG_LINES = 200        # Tail of overlay.log to include
 BUG_REPORT_MAX_CLIPBOARDS = 5     # Most recent clipboard debug files
 BUG_REPORT_DB = CACHE_DIR / "bug_reports.jsonl"

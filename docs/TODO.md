@@ -1,6 +1,6 @@
 # LAMA (Live Auction Market Assessor) — Bug & Work Tracker
 
-**Jira Board:** [couloirgg.atlassian.net/jira/software/projects/PT/boards/36](https://couloirgg.atlassian.net/jira/software/projects/PT/boards/36)
+**Project Tracker:** Internal
 
 ## Bugs
 - [x] **KPI card currency icon swap** — Fixed: chaos_orb.png and exalted_orb.png filenames were swapped
