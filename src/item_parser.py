@@ -356,9 +356,10 @@ class ItemParser:
     # POE2 appends mod type annotations like (implicit), (enchant), (rune), etc.
     _MOD_ANNOTATION_RE = re.compile(r"\s*\((implicit|enchant|rune|mutated|desecrated|fractured|crafted|augmented)\)\s*$", re.IGNORECASE)
 
-    # Lines starting with "Grants Skill:" are skill grants, not tradeable mods
+    # Lines starting with "Grants Skill:" are skill grants, not tradeable mods.
+    # Also catches edge cases like "Grants Level X <skill>" (no colon).
     _SKIP_LINE_RE = re.compile(
-        r"^(Item Level|Level|Quality|Sockets|Requires|Rarity|Item Class|Grants Skill)",
+        r"^(Item Level|Level|Quality|Sockets|Requires|Rarity|Item Class|Grants Skill|Grants Level \d)",
         re.IGNORECASE,
     )
 

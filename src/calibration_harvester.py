@@ -130,10 +130,11 @@ def bracket_set_name(pass_num: int) -> str:
 # For backward compat and dry-run display
 PRICE_BRACKETS = _PRIMARY_BRACKETS
 
-RESULTS_PER_QUERY = 20
+RESULTS_PER_QUERY = 50
 FETCH_BATCH_SIZE = 10  # Trade API caps fetches at 10 IDs per request
-MIN_INTERVAL = 4.0  # seconds between API calls (raised from 2.5 to avoid rate limits)
-LONG_PENALTY_THRESHOLD = 300  # seconds — bail if penalty exceeds this
+BURST_SIZE = 4  # API calls per burst before pausing
+BURST_PAUSE = 8.0  # seconds to pause between bursts
+LONG_PENALTY_THRESHOLD = 300  # seconds — log warning for long penalties
 
 
 # ─── Output File ──────────────────────────────────────
@@ -265,7 +266,7 @@ def load_state(pass_num: int = 1) -> dict:
         except Exception:
             pass
     return {"completed_queries": [], "total_samples": 0,
-            "query_plan_seed": ""}
+            "query_plan_seed": "", "dead_combos": []}
 
 
 def save_state(state: dict, pass_num: int = 1):
@@ -400,22 +401,26 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
         if state.get("query_plan_seed") != seed:
             # New day or new pass — reset state
             state = {"completed_queries": [], "total_samples": 0,
-                     "query_plan_seed": seed}
+                     "query_plan_seed": seed, "dead_combos": []}
             save_state(state, pass_num)
 
     plan = build_query_plan(categories, seed, brackets)
 
     completed = set(state["completed_queries"])
+    dead_combos = set(state.get("dead_combos", []))
     remaining = [(cn, ic, cf, bl) for cn, ic, cf, bl in plan
-                 if make_query_key(cn, bl) not in completed]
+                 if make_query_key(cn, bl) not in completed
+                 and make_query_key(cn, bl) not in dead_combos]
 
     if not remaining:
         print(f"All {total_queries} queries already completed for pass {pass_num}. "
               f"({state['total_samples']} samples collected)")
         return
 
+    skipped_dead = len(dead_combos - completed)
     print(f"Remaining queries: {len(remaining)} "
-          f"(skipping {len(completed)} already completed)")
+          f"(skipping {len(completed)} completed"
+          f"{f', {skipped_dead} dead' if skipped_dead else ''})")
 
     if dry_run:
         print("\n--- DRY RUN: Query Plan ---")
@@ -457,6 +462,7 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
     skipped_low_price = 0
     skipped_fake = 0
     errors = 0
+    burst_count = 0  # API calls in current burst
     t_start = time.time()
 
     for cat_name, item_class, cat_filter, bracket_label in remaining:
@@ -472,18 +478,21 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
               f"{cat_name} / {bracket_label} "
               f"({price_min}-{price_max or 'max'} {price_currency})")
 
+        # Burst pacing: pause after every BURST_SIZE API calls
+        if burst_count >= BURST_SIZE:
+            time.sleep(BURST_PAUSE)
+            burst_count = 0
+
         # Rate limit
         trade_client._rate_limit()
-        time.sleep(max(0, MIN_INTERVAL - trade_client._min_interval))
 
         # Check for long penalty
         if trade_client._is_rate_limited():
             wait = trade_client._rate_limited_until - time.time()
             if wait > LONG_PENALTY_THRESHOLD:
                 print(f"  Rate limited for {wait:.0f}s (>{LONG_PENALTY_THRESHOLD}s) "
-                      f"— saving state and exiting.")
+                      f"— long wait, saving state first...")
                 save_state(state, pass_num)
-                sys.exit(0)
             print(f"  Rate limited, waiting {wait:.0f}s...")
             time.sleep(wait + 1)
 
@@ -495,18 +504,21 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
             trade_client._rate_limit()
             resp = session.post(search_url, json=query_body, timeout=10)
             trade_client._parse_rate_limit_headers(resp)
+            burst_count += 1
 
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", 5))
                 if retry_after > LONG_PENALTY_THRESHOLD:
-                    print(f"  429 with penalty {retry_after}s — saving and exiting.")
+                    print(f"  429 with penalty {retry_after}s — long wait, "
+                          f"saving state first...")
                     save_state(state, pass_num)
-                    sys.exit(0)
                 print(f"  429 — waiting {retry_after}s...")
-                time.sleep(retry_after)
+                time.sleep(retry_after + 1)
+                burst_count = 0  # Reset burst after penalty wait
                 trade_client._rate_limit()
                 resp = session.post(search_url, json=query_body, timeout=10)
                 trade_client._parse_rate_limit_headers(resp)
+                burst_count += 1
 
             if resp.status_code != 200:
                 print(f"  Search HTTP {resp.status_code}, skipping")
@@ -521,9 +533,11 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
             total = search_data.get("total", 0)
 
             if not query_id or not result_ids:
-                print(f"  0 results")
+                print(f"  0 results (marking dead)")
                 queries_done += 1
                 state["completed_queries"].append(query_key)
+                if query_key not in state.get("dead_combos", []):
+                    state.setdefault("dead_combos", []).append(query_key)
                 save_state(state, pass_num)
                 continue
 
@@ -557,10 +571,13 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
         for batch_start in range(0, len(available_ids), FETCH_BATCH_SIZE):
             batch_ids = available_ids[batch_start:batch_start + FETCH_BATCH_SIZE]
             try:
+                if burst_count >= BURST_SIZE:
+                    time.sleep(BURST_PAUSE)
+                    burst_count = 0
                 trade_client._rate_limit()
-                time.sleep(max(0, MIN_INTERVAL - trade_client._min_interval))
 
                 batch_listings = trade_client._do_fetch(query_id, batch_ids)
+                burst_count += 1
                 if batch_listings:
                     listings.extend(batch_listings)
             except Exception as e:
@@ -679,6 +696,8 @@ def main():
                              "skips completed queries even across days)")
     parser.add_argument("--reset", action="store_true",
                         help="Reset today's state and start fresh")
+    parser.add_argument("--reset-dead", action="store_true",
+                        help="Clear dead combo lists from all pass state files")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable debug logging")
 
@@ -722,6 +741,26 @@ def main():
         if HARVESTER_STATE_FILE.exists():
             HARVESTER_STATE_FILE.unlink()
         print("State reset.")
+
+    # Clear dead combos if requested
+    if args.reset_dead:
+        import glob as _glob
+        pattern = str(HARVESTER_STATE_FILE.parent / "harvester_state_p*.json")
+        cleared = 0
+        for sf_path in _glob.glob(pattern):
+            try:
+                with open(sf_path, "r", encoding="utf-8") as f:
+                    st = json.load(f)
+                if st.get("dead_combos"):
+                    n = len(st["dead_combos"])
+                    st["dead_combos"] = []
+                    with open(sf_path, "w", encoding="utf-8") as f:
+                        json.dump(st, f, indent=2)
+                    cleared += n
+                    print(f"  Cleared {n} dead combos from {Path(sf_path).name}")
+            except Exception:
+                pass
+        print(f"Dead combos cleared ({cleared} total).")
 
     # Run each pass
     for pass_num in range(args.start_pass, args.passes + 1):
