@@ -249,7 +249,7 @@ Sections separated by `--------`. Mod annotations in parentheses: `(implicit)`, 
 - **Monitor:** 3440x1440 ultrawide
 - **POE2:** Windowed Fullscreen
 - **Python:** 3.11
-- **Project path:** `C:\Users\Stu\GitHub\POE2_OCR`
+- **Project path:** `<your_clone_dir>/POE2_OCR`
 - **League:** Fate of the Vaal
 - **Debug files:** `~/.poe2-price-overlay/debug/clipboard_*.txt`
 - **Log file:** `~/.poe2-price-overlay/overlay.log`
