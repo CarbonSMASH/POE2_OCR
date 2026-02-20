@@ -292,7 +292,7 @@ class BugReporter:
             message += f"\n{description}"
         message += f"\n\n**System:** {data['system_info']}"
         message += f"\n**Session:** {data['session_stats']}"
-        message += f"\n\n`claude \"Look at bug: {title}\"`"
+        message += f"\n\n`Look at bug: {title}`"
         if len(message) > 2000:
             message = message[:1997] + "..."
 

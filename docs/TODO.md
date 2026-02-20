@@ -12,6 +12,7 @@
 - [ ] **Overlay UI overhaul** — Full redesign of the in-game overlay text UI. Current overlay looks dated (90s aesthetic); needs a clean, modern, unobtrusive design that matches LAMA's dashboard styling. Consider: semi-transparent glass/frosted panels, refined typography, subtle animations, tier-based color accents without visual clutter, compact information density. Should feel native to POE2's aesthetic.
 - [ ] **Opt-in session telemetry** — Users currently have no way to share diagnostic data. Add an opt-in system where users can upload session data (scored items, estimates vs actuals, errors, performance) for investigation. Needs: consent toggle in dashboard settings, lightweight upload endpoint, privacy-respecting data collection (no PII), periodic batch upload rather than real-time.
 - [ ] **Flag inaccurate result** — Quick one-click way for users to flag a price estimate as wrong directly from the overlay. Could be a small button/hotkey on the overlay itself. Flagged items should include the item data, our estimate, and optionally the user's correction. Feed into calibration improvement pipeline.
+- [ ] **Harvester speed improvements** — (1) Fetch 40-50 items per query instead of 20 (doubles samples/query), (2) burst-then-pause rate strategy matching actual API windows, (3) auto-wait through penalties instead of exiting, (4) skip dead category/bracket combos with 0 results. Currently ~33 min/pass best case.
 - [ ] **Process name in Task Manager** — `pythonw.exe` is hard to find; set a custom process/app name so the app shows properly in Task Manager's Apps list (e.g., "POE2 Price Overlay")
 - [ ] **ilvl breakpoint tables** — ilvl is now included in trade API queries for base items, but different slots have different ilvl breakpoints (bows need 82 for top phys%, wands only need 81). Could build per-slot breakpoint tables and consider ilvl in loot filter tiering for exceptional bases.
 - [ ] **Common mod classification** — Heuristic-based; may occasionally misclassify an unusual valuable mod as "common". Mitigated by hybrid queries that always require key mods.
@@ -34,7 +35,7 @@
 - [x] **Dashboard layout reorganization** — Detection settings moved from right column into expanded OverlayPreview section (2×2 grid). Right column now shows InventoryPreview with real item art.
 - [x] **Inventory preview with POE2 item art** — 8×4 grid using real item images from `web.poecdn.com` CDN (sword, body armor, helmet, ring, boots, gloves). SVG silhouette filler icons for non-art cells. Overlay bars use actual `OverlaySampleChip` component for 1:1 match with in-game overlay.
 - [x] **Calibration shard regenerated** — From harvester passes 6-15: 15,302 raw → 3,849 samples (25.3 KB). Validation: 75.7% within 2x accuracy (PASS, target ≥70%).
-- [x] **Game abstraction docs** — `GAME_ABSTRACTION.md` covering `GameConfig` dataclass and `PricingEngine` facade; `CLAUDE_CODE_HANDOFF.md` updated with `core/` and `games/` modules, test count updated to 153.
+- [x] **Game abstraction docs** — `GAME_ABSTRACTION.md` covering `GameConfig` dataclass and `PricingEngine` facade; `DEVELOPER_HANDOFF.md` updated with `core/` and `games/` modules, test count updated to 153.
 
 ### Session 22 (2026-02-19)
 - [x] **Overlay tier customization** — Per-tier color pickers (text, border, background) in dashboard with live preview; custom styles persist in `overlay_tier_styles` setting and apply in overlay subprocess
@@ -150,7 +151,7 @@
 - [x] Discord webhook bug reporting — Ctrl+Shift+B opens dark-themed dialog, collects logs + clipboard captures + system info, uploads to Discord channel
 - [x] Bug report dialog — standalone Toplevel (not transient), forced above fullscreen via Win32 SetWindowPos, timestamp header, title + description fields, Ctrl+Enter to send
 - [x] Local bug report database — each report appended to `bug_reports.jsonl` for cross-session analysis
-- [x] Claude prompt in Discord — each message includes copyable `claude "Look at bug: <title>"` for quick session start
+- [x] Debug prompt in Discord — each bug report includes copyable `Look at bug: <title>` for quick triage
 
 ### Session 9 (2026-02-16)
 - [x] DPS & defense stat integration — weapons scored by total DPS output, armor by total defense; low values crush grade

@@ -1,4 +1,4 @@
-# POE2 Price Overlay — Claude Code Handoff
+# POE2 Price Overlay — Developer Reference
 
 > **Last updated:** 2026-02-18
 > **Status:** Working prototype — frameless desktop app + calibration shards + local mod scoring + DPS/defense integration + trade API pricing + 106-test regression suite
@@ -337,11 +337,9 @@ Add a subtle "Buy me a coffee" button/link that connects to the user's accounts.
 ## How To Resume Development
 
 **First time on a new machine:**
-1. Clone: `git clone https://github.com/CarbonSMASH/POE2_OCR.git`
+1. Clone: `git clone https://github.com/CouloirGG/lama.git`
 2. `cd POE2_OCR`
 3. `pip install -r requirements.txt`
-4. Run `claude` (Claude Code CLI)
-5. Say: "Read CLAUDE_CODE_HANDOFF.md and continue development"
 
 **Switching between machines:**
 1. `cd POE2_OCR` → double-click `scripts/SYNC.bat` (or run `git pull && pip install -r requirements.txt`)
