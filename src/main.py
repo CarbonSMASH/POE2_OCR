@@ -430,7 +430,10 @@ class LAMA:
 
                 # Rare/magic/unknown unidentified — no mods to price
                 logger.info(f"Unidentified {item.rarity}: {base}")
-                self._show_dismiss(item, cursor_x, cursor_y)
+                self.overlay.show_price(
+                    text="UNID", tier="low",
+                    cursor_x=cursor_x, cursor_y=cursor_y,
+                )
                 return
 
             # Step 1c: Corrupted uniques → trade API for Vaal-outcome-aware pricing
