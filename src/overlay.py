@@ -578,7 +578,7 @@ class PriceOverlay:
             secondary_part = secondary_part.strip()
 
         # Check for JUNK/C/SCRAP — plain small tag, no ornate frame
-        is_plain = text in ("SCRAP", "PASS") or (
+        is_plain = text in ("SCRAP", "PASS", "UNID") or (
             grade_letter in ("C", "JUNK") and not estimate)
 
         if is_plain:
