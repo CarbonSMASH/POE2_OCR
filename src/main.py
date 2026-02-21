@@ -550,7 +550,7 @@ class LAMA:
 
         # Show initial checking indicator
         self.overlay.show_price(
-            text=f"{display_name}: Checking.",
+            text="Checking...",
             tier="low",
             cursor_x=cursor_x,
             cursor_y=cursor_y,
@@ -565,12 +565,7 @@ class LAMA:
                 if _is_stale():
                     return
                 dots = (dots % 3) + 1
-                self.overlay.show_price(
-                    text=f"{display_name}: Checking{'.' * dots}",
-                    tier="low",
-                    cursor_x=cursor_x,
-                    cursor_y=cursor_y,
-                )
+                self.overlay.update_text(f"Checking{'.' * dots}")
 
         def _do_price():
             anim = threading.Thread(
@@ -657,7 +652,7 @@ class LAMA:
 
         # Show initial checking indicator
         self.overlay.show_price(
-            text=f"{display_name}{tag}: Checking.",
+            text="Checking...",
             tier="low",
             cursor_x=cursor_x,
             cursor_y=cursor_y,
@@ -672,12 +667,7 @@ class LAMA:
                 if _is_stale():
                     return
                 dots = (dots % 3) + 1
-                self.overlay.show_price(
-                    text=f"{display_name}{tag}: Checking{'.' * dots}",
-                    tier="low",
-                    cursor_x=cursor_x,
-                    cursor_y=cursor_y,
-                )
+                self.overlay.update_text(f"Checking{'.' * dots}")
 
         def _do_price():
             anim = threading.Thread(
@@ -731,14 +721,14 @@ class LAMA:
         if static_result:
             static_display = static_result.get("display", "?")
             self.overlay.show_price(
-                text=f"{display_name}{tag}: Checking.",
+                text="Checking...",
                 tier=static_result.get("tier", "low"),
                 cursor_x=cursor_x, cursor_y=cursor_y,
                 price_divine=static_result.get("divine_value", 0),
             )
         else:
             self.overlay.show_price(
-                text=f"{display_name}{tag}: Checking.",
+                text="Checking...",
                 tier="low",
                 cursor_x=cursor_x, cursor_y=cursor_y,
             )
@@ -759,11 +749,7 @@ class LAMA:
                 if _is_stale():
                     return
                 dots = (dots % 3) + 1
-                self.overlay.show_price(
-                    text=f"{display_name}{tag}: Checking{'.' * dots}",
-                    tier="low",
-                    cursor_x=cursor_x, cursor_y=cursor_y,
-                )
+                self.overlay.update_text(f"Checking{'.' * dots}")
 
         def _do_price():
             anim = threading.Thread(
@@ -1030,7 +1016,7 @@ class LAMA:
             with self._trade_gen_lock:
                 return my_gen != self._trade_generation
 
-        self.overlay.show_price(text=f"{grade_str}: Checking.",
+        self.overlay.show_price(text="Checking...",
                                 tier="low",
                                 cursor_x=cursor_x, cursor_y=cursor_y)
         search_done = threading.Event()
@@ -1041,10 +1027,7 @@ class LAMA:
                 if _is_stale():
                     return
                 dots = (dots % 3) + 1
-                self.overlay.show_price(
-                    text=f"{grade_str}: Checking{'.' * dots}",
-                    tier="low",
-                    cursor_x=cursor_x, cursor_y=cursor_y)
+                self.overlay.update_text(f"Checking{'.' * dots}")
 
         def _do_deep():
             threading.Thread(target=_animate_dots, daemon=True,
