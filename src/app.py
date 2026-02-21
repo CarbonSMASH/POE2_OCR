@@ -258,7 +258,7 @@ def _set_icon_and_show(get_hwnd, show_fn):
     except Exception:
         pass  # non-critical — falls back to executable icon
 
-    # Now reveal the window — user only ever sees the divine orb
+    # Now reveal the window — user only ever sees the LAMA icon
     show_fn()
 
 
@@ -381,7 +381,9 @@ def main():
     ).start()
 
     # This blocks until the window is destroyed (force_close / quit)
-    webview.start()
+    from bundle_paths import get_resource
+    ico_path = str(get_resource("resources/img/favicon.ico"))
+    webview.start(icon=ico_path)
 
     print("Window closed. Shutting down.")
     tray.stop()
