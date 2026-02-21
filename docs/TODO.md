@@ -30,6 +30,14 @@
 
 ## Completed
 
+### Session 26 (2026-02-20)
+- [x] **Auto-scale overlay to game window resolution** — Overlay dimensions (fonts, padding, icons, pip sizes) now scale proportionally to game window height relative to a 1080p baseline. Formula: `scale = game_h / 1080`, clamped to `[0.6, 1.5]`. At 864px: scale=0.80 (smaller overlay). At 1080p: scale=1.0 (unchanged). New `OVERLAY_REFERENCE_HEIGHT` constant in config.py.
+- [x] **Lightweight reshow path** — Re-hovering the same item after moving away now repositions the overlay without re-running the full pricing pipeline (no re-parse, re-score, or API calls). New `reshow()` method on PriceOverlay, `set_reshow_callback()` on ItemDetector, wired in main.py.
+- [x] **Fix overlay ghost pixels on Windows** — WS_EX_LAYERED + transparentcolor windows could leave "ghost" pixels at old positions when moved. Fixed by setting `alpha=0` before repositioning and restoring to `0.92` after — directly instructs DWM compositor, more reliable than `withdraw()`.
+- [x] **Fix DPI-aware screen positioning** — Overlay used tkinter's `winfo_screenwidth()` (DPI-scaled logical pixels) but cursor uses Win32 `GetCursorPos` (physical pixels), causing misplacement on HiDPI displays. Fixed with `GetSystemMetrics` for physical-pixel screen size.
+- [x] **Fix unicode logging crashes** — Arrow character `→` (U+2192) in logger calls crashes on Windows cp1252 consoles. Replaced with `->` in main.py, trade_client.py, mod_parser.py.
+- [x] **Collapse pending overlay updates** — Multiple show/hide updates could queue within 50ms, causing flicker and stale-artifact rendering. Now only the final show/hide in each batch is executed.
+
 ### Session 25 (2026-02-20)
 - [x] **Trade action buttons** — Full trade flow in Watchlist tab: Whisper, Invite, Hideout, Trade, Kick buttons per listing. Chat command engine (`game_commands.py`) sends commands via keystroke simulation + clipboard paste. Authenticated mode (`trade_actions.py`) uses POESESSID + whisper_token/hideout_token for API-based actions without chat. POESESSID input with password masking + clear button in Watchlist settings. Token indicators show API vs chat mode per listing.
 
