@@ -394,6 +394,16 @@ class PriceOverlay:
         with self._lock:
             self._pending_updates.append(("reshow", cursor_x, cursor_y))
 
+    def update_text(self, text: str):
+        """Update the displayed text in-place without re-rendering.
+
+        Used for dot animations (Checking. → Checking.. → Checking...)
+        to avoid full canvas redraws that cause visual flicker.
+        Thread-safe.
+        """
+        with self._lock:
+            self._pending_updates.append(("update_text", text))
+
     def hide(self):
         """Hide the price overlay. Thread-safe."""
         with self._lock:
@@ -823,11 +833,13 @@ class PriceOverlay:
             self._pending_updates.clear()
 
         if updates:
-            # Find the last show/reshow and last hide in the batch
+            # Find the last show/reshow/update_text and last hide in the batch
             last_show = None
             last_reshow = None
+            last_update_text = None
             last_show_idx = -1
             last_hide_idx = -1
+            last_update_text_idx = -1
             for i, update in enumerate(updates):
                 if update[0] == "show":
                     last_show = update
@@ -835,12 +847,15 @@ class PriceOverlay:
                 elif update[0] == "reshow":
                     last_reshow = update
                     last_show_idx = i  # reshow counts as a show for ordering
+                elif update[0] == "update_text":
+                    last_update_text = update
+                    last_update_text_idx = i
                 elif update[0] == "hide":
                     last_hide_idx = i
 
             # Execute only the final action
             try:
-                if last_show_idx > last_hide_idx:
+                if last_show_idx > last_hide_idx and last_show_idx > last_update_text_idx:
                     # Prefer full show over reshow when both are pending
                     if last_show and (not last_reshow or
                             updates.index(last_show) > updates.index(last_reshow)):
@@ -850,6 +865,10 @@ class PriceOverlay:
                     elif last_reshow:
                         _, cx, cy = last_reshow
                         self._do_reshow(cx, cy)
+                elif last_update_text_idx > last_hide_idx:
+                    # Lightweight text-only update (no re-render)
+                    _, text = last_update_text
+                    self._do_update_text(text)
                 elif last_hide_idx >= 0:
                     self._do_hide()
             except Exception as e:
@@ -1165,6 +1184,18 @@ class PriceOverlay:
             intensity = self._sheen_profile[i] if i < len(self._sheen_profile) else 0.05
             fill = self._blend_hex(self._sheen_bg, self._sheen_color, intensity)
             c.itemconfigure(sid, fill=fill)
+
+    def _do_update_text(self, text: str):
+        """Update displayed text in-place without re-rendering the overlay.
+
+        Only changes the canvas text item content — no canvas clear, no
+        background redraw, no repositioning.  Used for dot animations.
+        """
+        if not self._root or not self._canvas:
+            return
+        price_id = self._cv_items.get("price_text")
+        if price_id:
+            self._canvas.itemconfigure(price_id, text=text)
 
     def _do_reshow(self, cursor_x: int, cursor_y: int):
         """Reposition and re-display the overlay without re-rendering.
