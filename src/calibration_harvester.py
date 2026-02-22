@@ -672,6 +672,12 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
 
     save_state(state, pass_num)
 
+    # Close HTTP session to prevent connection pool from keeping process alive
+    try:
+        trade_client._session.close()
+    except Exception:
+        pass
+
 
 # ─── CLI Entry Point ─────────────────────────────────
 
@@ -783,3 +789,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)
