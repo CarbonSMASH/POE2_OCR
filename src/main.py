@@ -368,10 +368,14 @@ class LAMA:
                 )
                 if not result:
                     logger.info(f"Unknown currency, skipping: {item.name}")
+                    self.overlay.hide()
+                    self.item_detector.suppress_reshow()
                     return  # unknown currency → skip silently
                 chaos_val = result.get("divine_value", 0) * self.price_cache.divine_to_chaos
                 if chaos_val < _CURRENCY_SKIP_CHAOS:
                     logger.info(f"Low-value currency ({chaos_val:.0f}c), skipping: {item.name}")
+                    self.overlay.hide()
+                    self.item_detector.suppress_reshow()
                     return  # low-value currency → skip silently
                 # Show clean overlay for valuable currency
                 static_text = result["display"]
@@ -406,7 +410,7 @@ class LAMA:
                     price_str = "valuable"
                     tier = "good"
                     divine = 0
-                chanceable_text = f"Chance \u2192 {unique_name} ({price_str})"
+                chanceable_text = f"{price_str} Chance \u2192 {unique_name}"
                 logger.info(f"Chanceable base: {item.base_type} -> {unique_name} ({price_str})")
                 self.overlay.show_price(
                     text=chanceable_text,
@@ -430,7 +434,7 @@ class LAMA:
                 if item.rarity == "unique":
                     result = self.price_cache.lookup_unidentified(base)
                     if result:
-                        unid_text = f"{base} (unid): {result['display']}"
+                        unid_text = f"{result['display']} unid"
                         logger.info(
                             f">>> PRICE [unid] {base}: {result['display']} "
                             f"({result['name']})"

@@ -178,9 +178,7 @@ class PriceCache:
             display = self._enrich(low)["display"]
             name = low["name"]
         else:
-            low_str = self._format_value(low_dv)
-            high_str = self._format_value(high_dv)
-            display = f"{low_str}-{high_str}"
+            display = self._format_range(low_dv, high_dv)
             name = f"{len(matches)} possible uniques"
 
         # Tier based on highest possible value
@@ -216,6 +214,30 @@ class PriceCache:
         if chaos >= 3:
             return f"{chaos:.0f} Chaos"
         return "< 3 Chaos"
+
+    def _format_range(self, low_dv: float, high_dv: float) -> str:
+        """Format a divine-value range with a single currency suffix.
+
+        Uses the high value to pick denomination, then expresses both
+        values in that unit so the overlay currency parser splits cleanly.
+        """
+        if high_dv >= 0.85:
+            lo = f"{low_dv:.0f}" if low_dv >= 10 else f"{low_dv:.1f}"
+            hi = f"{high_dv:.0f}" if high_dv >= 10 else f"{high_dv:.1f}"
+            return f"~{lo}-{hi}d"
+        ex_rate = self.divine_to_exalted
+        if ex_rate > 0:
+            low_ex = low_dv * ex_rate
+            high_ex = high_dv * ex_rate
+            if high_ex >= 1:
+                lo = f"{low_ex:.0f}" if low_ex >= 10 else f"{low_ex:.1f}"
+                hi = f"{high_ex:.0f}" if high_ex >= 10 else f"{high_ex:.1f}"
+                return f"~{lo}-{hi}ex"
+        low_c = low_dv * self.divine_to_chaos
+        high_c = high_dv * self.divine_to_chaos
+        lo = f"{low_c:.0f}" if low_c >= 10 else f"{low_c:.1f}"
+        hi = f"{high_c:.0f}" if high_c >= 10 else f"{high_c:.1f}"
+        return f"~{lo}-{hi}c"
 
     def lookup_from_text(self, ocr_text: str) -> Optional[dict]:
         """

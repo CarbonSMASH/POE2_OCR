@@ -76,6 +76,15 @@ class ItemDetector:
         """
         self._on_reshow = callback
 
+    def suppress_reshow(self):
+        """Prevent the next reshow from firing.
+
+        Called by the pipeline when it decides not to display an overlay
+        (e.g. low-value currency skip).  Without this, cursor wobble can
+        re-trigger a reshow of stale overlay content.
+        """
+        self._awaiting_reshow = False
+
     def _is_same_position(self, pos_a: Tuple[int, int], pos_b: Tuple[int, int]) -> bool:
         """Check if two positions are within CURSOR_STILL_RADIUS of each other."""
         dx = abs(pos_a[0] - pos_b[0])
