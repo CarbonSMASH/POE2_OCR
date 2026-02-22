@@ -1261,6 +1261,7 @@ class PriceOverlay:
 
     def _do_hide(self):
         """Actually hide the overlay (must be on main thread)."""
+        logger.debug(f"_do_hide called, _visible={self._visible}")
         if self._root and self._visible:
             # Cancel auto-hide timer so it can't fire later and kill a
             # subsequent show_price (the root cause of the "flash and vanish" bug)
