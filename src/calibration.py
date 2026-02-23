@@ -54,7 +54,7 @@ class CalibrationEngine:
     MOD_COUNT_WEIGHT = 0.15    # total mod count difference weight (r=0.114)
     DPS_WEIGHT = 0.10          # DPS factor difference weight (r=0.039)
     DEFENSE_WEIGHT = 0.10      # defense factor difference weight (r=0.028)
-    MOD_IDENTITY_WEIGHT = 0.50 # weighted Jaccard distance on mod groups
+    MOD_IDENTITY_WEIGHT = 0.15 # weighted Jaccard distance on mod groups
 
     # Group-prior blending: when k-NN neighbors are distant, blend toward
     # group median to prevent wild extrapolation
