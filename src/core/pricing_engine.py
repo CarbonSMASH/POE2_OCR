@@ -134,8 +134,7 @@ class PricingEngine:
                 dps_factor=getattr(score, "dps_factor", 1.0),
                 defense_factor=getattr(score, "defense_factor", 1.0),
                 top_tier_count=getattr(score, "top_tier_count", 0),
-                mod_count=(getattr(score, "prefix_count", 0)
-                           + getattr(score, "suffix_count", 0)) or 4,
+                mod_count=len(getattr(score, "mod_scores", [])) or 4,
             )
         except Exception as e:
             logger.debug(f"Calibration estimate failed: {e}")

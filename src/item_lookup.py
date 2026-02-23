@@ -92,8 +92,7 @@ class ItemLookup:
                     getattr(item, "item_class", "") or "",
                     grade=score.grade.value,
                     top_tier_count=getattr(score, "top_tier_count", 0),
-                    mod_count=(getattr(score, "prefix_count", 0)
-                               + getattr(score, "suffix_count", 0)) or 4,
+                    mod_count=len(getattr(score, "mod_scores", [])) or 4,
                 )
                 if price_divine is not None:
                     from price_cache import PriceCache
