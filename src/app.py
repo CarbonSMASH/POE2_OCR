@@ -85,6 +85,7 @@ class WindowApi:
         self._original_proc = None
         self._hook_ref = None  # prevent garbage collection
         self._tray = None  # set by main() after tray starts
+        self._ready_event = threading.Event()
 
     def _get_hwnd(self):
         import ctypes
@@ -188,6 +189,10 @@ class WindowApi:
         self._original_proc = user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC,
                                                         hook_proc)
 
+    def on_ready(self):
+        """Called from JS when dashboard has loaded initial data."""
+        self._ready_event.set()
+
     def begin_guard(self):
         """Block window resizes for the next second (called from JS before actions)."""
         if not self._original_proc:
@@ -279,7 +284,7 @@ def _tooltip_updater(tray):
         time.sleep(10)
 
 
-def _set_icon_and_show(get_hwnd, show_fn, api_ref=None):
+def _set_icon_and_show(get_hwnd, show_fn, api_ref=None, _ms=None):
     """Background thread: set the taskbar icon, then reveal the window."""
     import ctypes
     from bundle_paths import get_resource
@@ -294,6 +299,8 @@ def _set_icon_and_show(get_hwnd, show_fn, api_ref=None):
     if not hwnd:
         show_fn()  # show anyway even if icon fails
         return
+    if _ms:
+        _log(f"[Startup] hwnd found ({_ms()})")
 
     # Set the taskbar icon before the window is visible
     try:
@@ -317,11 +324,21 @@ def _set_icon_and_show(get_hwnd, show_fn, api_ref=None):
     if api_ref:
         api_ref._install_hook()
 
+    # Wait for dashboard to signal it has received initial data
+    if api_ref:
+        ready = api_ref._ready_event.wait(timeout=5.0)
+        _log(f"[Startup] {'Dashboard ready' if ready else 'Ready timeout (5s)'}")
+
     # Now reveal the window — user only ever sees the LAMA icon
     show_fn()
+    if _ms:
+        _log(f"[Startup] Window shown ({_ms()})")
 
 
 def main():
+    _t0 = time.time()
+    def _ms(): return f"+{int((time.time() - _t0) * 1000)}ms"
+
     # Tell Windows this is its own app, not a generic Python process.
     # Must be called before any window is created.
     try:
@@ -337,6 +354,7 @@ def main():
         pass
 
     _ensure_deps()
+    _log(f"[Startup] Deps OK ({_ms()})")
     try:
         import webview
     except ImportError:
@@ -367,7 +385,7 @@ def main():
         _log("ERROR: Server failed to start within 10 seconds.")
         sys.exit(1)
 
-    _log("Server ready. Opening window...")
+    _log(f"[Startup] Server ready ({_ms()})")
 
     # Open the native window pointing at the dashboard
     api = WindowApi()
@@ -413,6 +431,7 @@ def main():
     )
     tray.start()
     api._tray = tray
+    _log(f"[Startup] Tray started ({_ms()})")
 
     # Tooltip updater (daemon thread)
     threading.Thread(target=_tooltip_updater, args=(tray,), daemon=True).start()
@@ -436,7 +455,7 @@ def main():
 
     # Set the taskbar icon, then show the window
     threading.Thread(
-        target=_set_icon_and_show, args=(api._get_hwnd, api.show, api), daemon=True
+        target=_set_icon_and_show, args=(api._get_hwnd, api.show, api, _ms), daemon=True
     ).start()
 
     # This blocks until the window is destroyed (force_close / quit)
