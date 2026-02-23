@@ -36,7 +36,7 @@ _GRADE_NUM = {"S": 4, "A": 3, "B": 2, "C": 1, "JUNK": 0}
 # Sample tuple: (score, divine, grade_num, dps_factor, defense_factor,
 #                top_tier_count, mod_count, timestamp, is_user)
 # top_tier_count: number of T1/T2 mods with weight >= 1.0 (0-6)
-# mod_count: prefix + suffix count (0-12)
+# mod_count: total parsed mods on the item (0-12)
 # timestamp: epoch seconds (0 for shard data)
 # is_user: True for user's own data (recency-weighted), False for shard data
 Sample = Tuple[float, float, int, float, float, int, int, int, bool]
