@@ -46,7 +46,8 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; overflow: hidden; margin: 0; padding: 0; }
     body { background: radial-gradient(ellipse at center, #1a1510 0%, #0d0b08 70%); color: #d4c9a8; font-family: 'DM Sans', 'Segoe UI', system-ui, sans-serif; }
-    #root { width: 100%; height: 100%; }
+    #root { width: 100%; height: 100%; opacity: 0; transition: opacity 0.15s ease; }
+    #root.ready { opacity: 1; }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #3a3128; border-radius: 3px; }
@@ -5023,6 +5024,17 @@
         el.addEventListener("scroll", onScroll);
         return () => el.removeEventListener("scroll", onScroll);
       }, []);
+
+      // Reveal UI after React has painted the init data
+      useEffect(() => {
+        if (!settingsLoaded) return;
+        // useEffect fires after React commit; rAF fires after browser paint
+        const id = requestAnimationFrame(() => {
+          document.getElementById("root").classList.add("ready");
+          try { window.pywebview?.api?.on_ready(); } catch(e) {}
+        });
+        return () => cancelAnimationFrame(id);
+      }, [settingsLoaded]);
 
       // WebSocket handler
       const handleWsMessage = useCallback((msg) => {
