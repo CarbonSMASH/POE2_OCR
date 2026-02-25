@@ -17,17 +17,17 @@ logger = logging.getLogger(__name__)
 
 # ── GBM hyperparameters ──────────────────────────────────
 
-GBM_N_ESTIMATORS = 50
-GBM_MAX_DEPTH = 2
+GBM_N_ESTIMATORS = 100
+GBM_MAX_DEPTH = 4
 GBM_LEARNING_RATE = 0.1
 GBM_SUBSAMPLE = 1.0
-GBM_MIN_SAMPLES_LEAF = 50
-GBM_LOSS = "squared_error"
+GBM_MIN_SAMPLES_LEAF = 15
+GBM_LOSS = "huber"
 
-# Feature selection thresholds — raised to avoid sparse features
-MIN_MOD_FREQUENCY = 50
+# Feature selection thresholds — lowered to include rarer but important mods
+MIN_MOD_FREQUENCY = 20
 MAX_BASE_FEATURES = 10
-MIN_CLASS_SAMPLES_DEFAULT = 80
+MIN_CLASS_SAMPLES_DEFAULT = 50
 
 # Quality gate: models with CV R2 below this are discarded
 MIN_R2_CV = 0.02
@@ -92,11 +92,25 @@ def train_gbm_models(records: List[dict],
 
 def _train_class_gbm(item_class: str, records: List[dict], np,
                      ) -> Optional[dict]:
-    """Train one GradientBoostingRegressor, return serialized model."""
+    """Train one GradientBoostingRegressor, return serialized model.
+
+    Scales tree complexity with available data:
+    - Large classes (1500+): deeper trees, more estimators
+    - Medium classes (500+): balanced defaults
+    - Small classes (<500): shallower trees to prevent overfitting
+    """
     from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.model_selection import cross_val_score
 
     n = len(records)
+
+    # Adaptive hyperparameters based on class size
+    if n >= 1500:
+        n_est, depth, leaf = 150, 5, 20
+    elif n >= 500:
+        n_est, depth, leaf = 100, 4, 15
+    else:
+        n_est, depth, leaf = 60, 3, 10
 
     # ── Feature discovery ──────────────────────────────
 
@@ -129,7 +143,7 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         "dps_factor", "defense_factor", "somv_factor",
         "tier_score", "best_tier", "avg_tier",
         "arch_coc_spell", "arch_ci_es", "arch_mom_mana",
-        "pdps", "edps",
+        "pdps", "edps", "demand_score",
     ]
     mod_feature_names = [f"mod:{g}" for g in valid_mods]
     base_feature_names = [f"base:{bt}" for bt in valid_bases]
@@ -169,6 +183,7 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         X[row, 12] = rec.get("mana_score", 0.0)
         X[row, 13] = rec.get("pdps", 0.0)
         X[row, 14] = rec.get("edps", 0.0)
+        X[row, 15] = rec.get("demand_score", 0.0)
 
         # Mod features: roll-quality-weighted tier encoding
         mod_tiers = rec.get("mod_tiers", {})
@@ -191,27 +206,34 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
 
     # ── Train GBM ──────────────────────────────────────
 
+    # Build sample weights from sale_confidence (confirmed sales get more weight)
+    weights = np.ones(n, dtype=np.float64)
+    for row, rec in enumerate(records):
+        sc = rec.get("sale_confidence", 1.0)
+        if sc and sc != 1.0:
+            weights[row] = sc
+
     gbm = GradientBoostingRegressor(
-        n_estimators=GBM_N_ESTIMATORS,
-        max_depth=GBM_MAX_DEPTH,
+        n_estimators=n_est,
+        max_depth=depth,
         learning_rate=GBM_LEARNING_RATE,
         subsample=GBM_SUBSAMPLE,
-        min_samples_leaf=GBM_MIN_SAMPLES_LEAF,
+        min_samples_leaf=leaf,
         loss=GBM_LOSS,
         random_state=42,
     )
-    gbm.fit(X, y)
+    gbm.fit(X, y, sample_weight=weights)
 
     # ── Cross-validation R2 ────────────────────────────
 
     try:
         cv_scores = cross_val_score(
             GradientBoostingRegressor(
-                n_estimators=GBM_N_ESTIMATORS,
-                max_depth=GBM_MAX_DEPTH,
+                n_estimators=n_est,
+                max_depth=depth,
                 learning_rate=GBM_LEARNING_RATE,
                 subsample=GBM_SUBSAMPLE,
-                min_samples_leaf=GBM_MIN_SAMPLES_LEAF,
+                min_samples_leaf=leaf,
                 loss=GBM_LOSS,
                 random_state=42,
             ),

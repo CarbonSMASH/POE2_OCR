@@ -348,7 +348,7 @@ def is_fake_listing(grade: str, score: float, price_div: float,
 def write_calibration_record(score_result, price_divine: float,
                              item_class: str, league: str,
                              output_file: Path, base_type: str = "",
-                             parsed_item=None):
+                             parsed_item=None, listing: dict = None):
     """Append a calibration record to the shard output file."""
     record = {
         "ts": int(time.time()),
@@ -388,6 +388,15 @@ def write_calibration_record(score_result, price_divine: float,
         record["evasion"] = getattr(parsed_item, 'evasion', 0)
         record["energy_shield"] = getattr(parsed_item, 'energy_shield', 0)
         record["item_level"] = getattr(parsed_item, 'item_level', 0)
+
+    # Store listing ID for disappearance tracking (confirmed sales)
+    if listing:
+        listing_id = listing.get("id", "")
+        if listing_id:
+            record["listing_id"] = listing_id
+        listing_indexed = listing.get("listing", {}).get("indexed", "")
+        if listing_indexed:
+            record["listing_ts"] = listing_indexed
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, "a", encoding="utf-8") as f:
@@ -682,7 +691,8 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
                 write_calibration_record(score, price_div, item_class,
                                          league, output_file,
                                          base_type=getattr(item, "base_type", ""),
-                                         parsed_item=item)
+                                         parsed_item=item,
+                                         listing=listing)
                 last_grade = score.grade.value
                 batch_samples += 1
                 samples_this_run += 1

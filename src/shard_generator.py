@@ -175,7 +175,12 @@ def remove_outliers(records: List[dict]) -> Tuple[List[dict], int]:
 
 
 def dedup_records(records: List[dict]) -> Tuple[List[dict], int]:
-    """Remove duplicate (score, price, item_class, grade) entries."""
+    """Remove duplicate (score, price, item_class, grade, mod_groups) entries.
+
+    Includes mod composition in the dedup key so that items with identical
+    score/price but completely different mods (e.g., crit ring vs resist ring)
+    are preserved as distinct training samples.
+    """
     seen = set()
     deduped = []
     dup_count = 0
@@ -186,6 +191,7 @@ def dedup_records(records: List[dict]) -> Tuple[List[dict], int]:
             round(rec["min_divine"], 2),
             rec.get("item_class", ""),
             rec.get("grade", ""),
+            tuple(sorted(rec.get("mod_groups", []))),
         )
         if key in seen:
             dup_count += 1
@@ -361,6 +367,11 @@ def compact_record(rec: dict, mod_to_idx: dict = None, base_to_idx: dict = None)
                       for idx in mod_indices]
                 if any(r >= 0 for r in mr):
                     compact["mr"] = mr
+
+    # Sale confidence (from disappearance tracking)
+    sc = rec.get("sale_confidence", 0)
+    if sc and sc != 1.0:
+        compact["sc"] = round(sc, 1)
 
     # Raw combat stats
     pdps = rec.get("pdps", 0.0)
@@ -542,6 +553,7 @@ def _prepare_gbm_records(deduped: List[dict], mod_to_idx: dict,
             "mod_rolls": rec.get("mod_rolls", {}),
             "pdps": rec.get("pdps", 0.0),
             "edps": rec.get("edps", 0.0),
+            "sale_confidence": rec.get("sale_confidence", 1.0),
         })
 
     return gbm_records
@@ -825,6 +837,7 @@ def validate_shard(shard_path: str, seed: int = 42):
             mod_rolls=mod_rolls,
             pdps=s.get("pd", 0.0),
             edps=s.get("ed", 0.0),
+            sale_confidence=s.get("sc", 1.0),
         )
         train_records.append({
             "item_class": s.get("c", ""),

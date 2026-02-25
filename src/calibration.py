@@ -55,10 +55,11 @@ _GRADE_NUM = {"S": 4, "A": 3, "B": 2, "C": 1, "JUNK": 0}
 #  [18] mod_rolls_tuple    Tuple[Tuple[str, float], ...]  (group, roll_quality) pairs
 #  [19] pdps               float   physical DPS
 #  [20] edps               float   elemental DPS
+#  [21] sale_confidence    float   disappearance-based confidence (3.0=sold, 1.0=unknown, 0.3=stale)
 Sample = Tuple[float, float, int, float, float, int, int, int, bool,
                Tuple[str, ...], str, float, int, Tuple[Tuple[str, int], ...],
                float, float, float, float, Tuple[Tuple[str, float], ...],
-               float, float]
+               float, float, float]
 
 
 class CalibrationEngine:
@@ -66,21 +67,22 @@ class CalibrationEngine:
     MIN_GLOBAL_SAMPLES = 50
     _EPSILON = 0.02  # smoothing floor; exact match gets ~50x weight vs dist=1.0
 
-    # Distance metric weights — mod composition dominates price
+    # Distance metric weights — tuned for actual data coverage
     SCORE_WEIGHT = 0.05        # low: score is redundant with other features
     GRADE_PENALTY = 0.30       # per grade step
     TOP_TIER_WEIGHT = 0.25     # top-tier mod count difference
     MOD_COUNT_WEIGHT = 0.10    # total mod count difference
     DPS_WEIGHT = 0.25          # DPS factor difference — captures roll quality for weapons
     DEFENSE_WEIGHT = 0.25      # defense factor difference — captures roll quality for armor
-    MOD_IDENTITY_WEIGHT = 1.0  # weighted Jaccard distance — THE key price signal
-    MOD_TIER_WEIGHT = 0.15     # per-shared-mod tier mismatch penalty
+    MOD_IDENTITY_WEIGHT = 1.2  # weighted Jaccard distance — THE key price signal (boosted)
+    MOD_TIER_WEIGHT = 0.25     # per-shared-mod tier mismatch penalty (boosted: strong signal)
     BASE_TYPE_WEIGHT = 0.20    # binary: same base=0, different=0.20
     TIER_SCORE_WEIGHT = 0.15   # tier quality (sum(1/tier)) aggregate difference
     ARCHETYPE_WEIGHT = 0.15    # per-archetype score difference
-    SOMV_WEIGHT = 0.40         # average roll quality (somv_factor) difference
-    ROLL_QUALITY_WEIGHT = 0.50 # per-mod roll quality difference (key new signal)
-    DPS_TYPE_WEIGHT = 0.15     # phys vs elemental DPS ratio mismatch
+    SOMV_WEIGHT = 0.25         # average roll quality — reduced, somv ~1.0 for most data
+    ROLL_QUALITY_WEIGHT = 0.20 # per-mod roll quality — reduced, only ~4% coverage
+    DPS_TYPE_WEIGHT = 0.08     # phys vs elemental DPS — reduced, <1% coverage
+    DEMAND_WEIGHT = 0.15       # meta demand score difference
 
     # Group-prior blending: when k-NN neighbors are distant, blend toward
     # group median to prevent wild extrapolation
@@ -110,6 +112,10 @@ class CalibrationEngine:
         self._price_tables: Dict[str, dict] = {}
         # GBM models: item_class -> serialized model dict (shard v6+)
         self._gbm_models: Dict[str, dict] = {}
+        # Last estimate confidence (0.0-1.0, higher = better)
+        self.last_confidence: float = 0.0
+        # Demand index: per-(item_class, mod_group) demand scores
+        self._demand_index = None  # Optional[DemandIndex]
 
     @property
     def _k(self) -> int:
@@ -119,9 +125,24 @@ class CalibrationEngine:
             return 3
         return min(10, max(5, n // 5))
 
+    @staticmethod
+    def _k_for_pool(pool_size: int) -> int:
+        """Pool-aware k: sqrt-scaled with bounds [3, 15].
+
+        Small pools (< 10 samples) get k=3 to avoid averaging noise.
+        Large pools scale with sqrt for stable estimates.
+        """
+        if pool_size < 10:
+            return 3
+        return min(15, max(3, int(math.sqrt(pool_size))))
+
     def set_mod_weights(self, weights: Dict[str, float]):
         """Set mod importance weights for weighted Jaccard distance."""
         self._mod_weights = dict(weights)
+
+    def set_demand_index(self, demand_index):
+        """Set demand index for meta-aware pricing."""
+        self._demand_index = demand_index
 
     def _auto_populate_mod_weights(self):
         """Build _mod_weights from sample data + mod_database lookup."""
@@ -184,7 +205,9 @@ class CalibrationEngine:
                         continue
 
                     # Dedup: same item scanned multiple times
-                    dedup_key = (round(score, 3), round(divine, 2), item_class, grade)
+                    # Include mod composition so distinct items with same score/price are kept
+                    dedup_key = (round(score, 3), round(divine, 2), item_class, grade,
+                                 tuple(sorted(rec.get("mod_groups", []))))
                     if dedup_key in seen:
                         skipped += 1
                         continue
@@ -203,6 +226,7 @@ class CalibrationEngine:
                     rec_somv = rec.get("somv_factor", 1.0)
                     rec_pdps = rec.get("pdps", 0.0)
                     rec_edps = rec.get("edps", 0.0)
+                    rec_sc = rec.get("sale_confidence", 1.0)
                     self._insert(float(score), float(divine),
                                  item_class, grade_num,
                                  dps_factor, defense_factor,
@@ -214,7 +238,8 @@ class CalibrationEngine:
                                  mod_tiers=mod_tiers,
                                  somv_factor=rec_somv,
                                  mod_rolls=mod_rolls,
-                                 pdps=rec_pdps, edps=rec_edps)
+                                 pdps=rec_pdps, edps=rec_edps,
+                                 sale_confidence=rec_sc)
                     count += 1
         except Exception as e:
             logger.warning(f"Calibration: load error: {e}")
@@ -304,6 +329,7 @@ class CalibrationEngine:
                 somv_factor = s.get("v", 1.0)
                 pdps = s.get("pd", 0.0)
                 edps = s.get("ed", 0.0)
+                sale_confidence = s.get("sc", 1.0)
 
                 self._insert(float(score), float(price),
                              item_class, grade_num,
@@ -316,7 +342,8 @@ class CalibrationEngine:
                              mod_tiers=mod_tiers_dict,
                              somv_factor=somv_factor,
                              mod_rolls=mod_rolls_dict,
-                             pdps=pdps, edps=edps)
+                             pdps=pdps, edps=edps,
+                             sale_confidence=sale_confidence)
                 count += 1
 
             # Load learned weights (v5+ shards)
@@ -571,7 +598,8 @@ class CalibrationEngine:
                       mana_score: float, mod_groups: list = None,
                       base_type: str = "", mod_tiers: dict = None,
                       mod_rolls: dict = None, pdps: float = 0.0,
-                      edps: float = 0.0) -> Optional[float]:
+                      edps: float = 0.0,
+                      demand_score: float = 0.0) -> Optional[float]:
         """GBM estimate via pure-Python tree traversal. No sklearn at runtime.
 
         Returns estimated divine value, or None if no model available.
@@ -601,6 +629,7 @@ class CalibrationEngine:
             "arch_mom_mana": mana_score,
             "pdps": pdps,
             "edps": edps,
+            "demand_score": demand_score,
         }
 
         # Mod features: roll-quality-weighted tier encoding
@@ -690,6 +719,9 @@ class CalibrationEngine:
         """Return estimated divine value, or None if insufficient data.
 
         Priority: GBM > class k-NN > global k-NN > grade median.
+
+        Also stores the last confidence value in self.last_confidence
+        (0.0-1.0 scale, higher = more confident estimate).
         """
         grade_num = _GRADE_NUM.get(grade, 1)
 
@@ -707,6 +739,12 @@ class CalibrationEngine:
         es_score = arch.get("ci_es", 0.0)
         mana_score = arch.get("mom_mana", 0.0)
 
+        # Compute demand score if demand index is available
+        query_demand = 0.0
+        if self._demand_index and mod_groups:
+            query_demand = self._demand_index.get_demand_score(
+                item_class, mod_groups)
+
         # 1. Try GBM estimate (most accurate when model + mod_groups available)
         if mod_groups and self._gbm_models:
             gbm_est = self._gbm_estimate(
@@ -716,8 +754,10 @@ class CalibrationEngine:
                 coc_score, es_score, mana_score,
                 mod_groups=mod_groups, base_type=base_type,
                 mod_tiers=mod_tiers, mod_rolls=mod_rolls,
-                pdps=pdps, edps=edps)
+                pdps=pdps, edps=edps,
+                demand_score=query_demand)
             if gbm_est is not None:
+                self.last_confidence = 0.8  # GBM is most confident
                 return gbm_est
 
         # 2. Fall back to k-NN (class-specific)
@@ -725,35 +765,44 @@ class CalibrationEngine:
 
         class_samples = self._by_class.get(item_class)
         if class_samples and len(class_samples) >= self.MIN_CLASS_SAMPLES:
-            return self._interpolate(score, class_samples, grade_num,
-                                     dps_factor, defense_factor,
-                                     top_tier_count, mod_count,
-                                     item_class, mod_groups=mg_set,
-                                     base_type=base_type,
-                                     tier_score=tier_score,
-                                     coc_score=coc_score, es_score=es_score,
-                                     mana_score=mana_score,
-                                     mod_tiers=mod_tiers,
-                                     somv_factor=somv_factor,
-                                     mod_rolls=mod_rolls,
-                                     pdps=pdps, edps=edps)
+            result, confidence = self._interpolate(
+                score, class_samples, grade_num,
+                dps_factor, defense_factor,
+                top_tier_count, mod_count,
+                item_class, mod_groups=mg_set,
+                base_type=base_type,
+                tier_score=tier_score,
+                coc_score=coc_score, es_score=es_score,
+                mana_score=mana_score,
+                mod_tiers=mod_tiers,
+                somv_factor=somv_factor,
+                mod_rolls=mod_rolls,
+                pdps=pdps, edps=edps,
+                demand_score=query_demand)
+            self.last_confidence = confidence
+            return result
 
         # 3. Fall back to k-NN (global)
         if len(self._global) >= self.MIN_GLOBAL_SAMPLES:
-            return self._interpolate(score, self._global, grade_num,
-                                     dps_factor, defense_factor,
-                                     top_tier_count, mod_count,
-                                     item_class, mod_groups=mg_set,
-                                     base_type=base_type,
-                                     tier_score=tier_score,
-                                     coc_score=coc_score, es_score=es_score,
-                                     mana_score=mana_score,
-                                     mod_tiers=mod_tiers,
-                                     somv_factor=somv_factor,
-                                     mod_rolls=mod_rolls,
-                                     pdps=pdps, edps=edps)
+            result, confidence = self._interpolate(
+                score, self._global, grade_num,
+                dps_factor, defense_factor,
+                top_tier_count, mod_count,
+                item_class, mod_groups=mg_set,
+                base_type=base_type,
+                tier_score=tier_score,
+                coc_score=coc_score, es_score=es_score,
+                mana_score=mana_score,
+                mod_tiers=mod_tiers,
+                somv_factor=somv_factor,
+                mod_rolls=mod_rolls,
+                pdps=pdps, edps=edps,
+                demand_score=query_demand)
+            self.last_confidence = confidence * 0.7  # global pool is less specific
+            return result
 
         # 4. Last resort: class+grade median
+        self.last_confidence = 0.1  # very low confidence
         return self._grade_median_estimate(item_class, grade_num)
 
     def sample_count(self, item_class: str = "") -> int:
@@ -770,7 +819,7 @@ class CalibrationEngine:
                 mod_groups: list = None, base_type: str = "",
                 mod_tiers: dict = None, somv_factor: float = 1.0,
                 mod_rolls: dict = None, pdps: float = 0.0,
-                edps: float = 0.0):
+                edps: float = 0.0, sale_confidence: float = 1.0):
         """Insert a sample into class-specific and global lists (sorted)."""
         mg_tuple = tuple(sorted(set(mod_groups))) if mod_groups else ()
         # Compute tier aggregates
@@ -791,7 +840,7 @@ class CalibrationEngine:
                          arch.get("coc_spell", 0.0),
                          arch.get("ci_es", 0.0),
                          arch.get("mom_mana", 0.0),
-                         somv_factor, mr_tuple, pdps, edps)
+                         somv_factor, mr_tuple, pdps, edps, sale_confidence)
         self._group_medians_dirty = True
         insort(self._global, entry)
         if item_class:
@@ -865,7 +914,8 @@ class CalibrationEngine:
                      somv_factor: float = 1.0,
                      mod_rolls: dict = None,
                      pdps: float = 0.0,
-                     edps: float = 0.0) -> float:
+                     edps: float = 0.0,
+                     demand_score: float = 0.0) -> Tuple[float, float]:
         """k-NN inverse-distance-weighted interpolation in log-price space.
 
         Distance includes mod composition (Jaccard), per-mod tier matching,
@@ -876,10 +926,12 @@ class CalibrationEngine:
         3. Weight by 1 / (distance + 0.02), with recency bonus for user data
         4. Weighted average of log(divine), then exp() back
         5. Blend toward group median when neighbors are distant
+
+        Returns (estimate, confidence) where confidence is 0.0-1.0.
         """
         if mod_groups is None:
             mod_groups = frozenset()
-        k = self._k
+        k = self._k_for_pool(len(samples))
         now = time.time()
         query_tiers = mod_tiers or {}
         query_rolls = mod_rolls or {}
@@ -951,8 +1003,16 @@ class CalibrationEngine:
                 s_phys_ratio = s[19] / s_total
                 dps_type_d = abs(q_phys_ratio - s_phys_ratio) * self.DPS_TYPE_WEIGHT
 
+            # Demand distance: meta-relevant items should match similar demand
+            demand_d = 0.0
+            if demand_score > 0 and self._demand_index and item_class:
+                s_demand = self._demand_index.get_demand_score(
+                    item_class, list(s_mods))
+                demand_d = abs(demand_score - s_demand) * self.DEMAND_WEIGHT
+
             return (score_d + grade_d + ttc_d + mc_d + dps_d + def_d + mod_d
-                    + bt_d + ts_d + tier_d + arch_d + somv_d + rq_d + dps_type_d)
+                    + bt_d + ts_d + tier_d + arch_d + somv_d + rq_d
+                    + dps_type_d + demand_d)
 
         by_dist = sorted(candidates, key=_dist)
         neighbors = by_dist[:k]
@@ -965,9 +1025,13 @@ class CalibrationEngine:
             s_divine = s[1]
             s_ts = s[7]
             s_user = s[8]
+            s_sale_conf = s[21]  # sale_confidence: 3.0=sold, 1.0=unknown, 0.3=stale
             dist = _dist(s)
             dist_sum += dist
             w = 1.0 / (dist + self._EPSILON)
+
+            # Sale confidence: confirmed sales get 3x weight, stale listings get 0.3x
+            w *= s_sale_conf
 
             # Recency bonus: recent user data gets extra weight
             if s_user and s_ts > 0:
@@ -996,6 +1060,9 @@ class CalibrationEngine:
 
         result = math.exp(avg_log)
 
+        # Compute confidence: inverse of mean k-NN distance, 0-1 scale
+        confidence = 1.0 / (1.0 + mean_dist)
+
         # Cap wildly extrapolated estimates — with few samples the
         # log-space interpolation can produce absurd values.
         max_observed = max((s[1] for s in samples), default=100.0)
@@ -1003,8 +1070,8 @@ class CalibrationEngine:
 
         # Round to reasonable precision
         if result >= 10:
-            return round(result, 0)
+            return round(result, 0), confidence
         elif result >= 1:
-            return round(result, 1)
+            return round(result, 1), confidence
         else:
-            return round(result, 2)
+            return round(result, 2), confidence

@@ -981,16 +981,15 @@ class LAMA:
             self.stats["successful_lookups"] += 1
 
         # Auto-queue for background trade API calibration.
-        # A/S always, B sampled 1-in-3, C/JUNK sampled 1-in-10.
-        # Sampling rates are for collection only — analysis weights
-        # results equally regardless of sample rate.
+        # A/S always, B always, C sampled 1-in-3, JUNK sampled 1-in-5.
+        # Higher rates feed more real trade prices into calibration.
         import random
         grade = score.grade.value
-        if grade in ("A", "S"):
+        if grade in ("A", "S", "B"):
             self._calibration_queue.put((item, parsed_mods, score))
-        elif grade == "B" and random.random() < 0.33:
+        elif grade == "C" and random.random() < 0.33:
             self._calibration_queue.put((item, parsed_mods, score))
-        elif grade in ("C", "JUNK") and random.random() < 0.10:
+        elif grade == "JUNK" and random.random() < 0.20:
             self._calibration_queue.put((item, parsed_mods, score))
 
     def _deep_query_hotkey_loop(self):

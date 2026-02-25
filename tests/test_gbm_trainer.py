@@ -113,7 +113,7 @@ class TestTrainGBM:
         assert "Rings" in models
         model = models["Rings"]
         assert model["n_train"] == 500
-        assert len(model["trees"]) == 50
+        assert len(model["trees"]) == 100  # adaptive: 500 samples -> n_est=100
         assert len(model["feature_names"]) > 13  # numerics + some mods
 
     def test_skip_small_classes(self):
