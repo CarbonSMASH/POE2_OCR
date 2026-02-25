@@ -72,7 +72,7 @@ def spawn_powershell(module_name, project_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="POE2 OCR Test Runner")
+    parser = argparse.ArgumentParser(description="LAMA Test Runner")
     parser.add_argument(
         "--module", "-m",
         help="Run only this test module (e.g., 'mod_database' or 'test_mod_database')",
@@ -102,7 +102,7 @@ def main():
             sys.exit(1)
         modules = matches
 
-    print(f"POE2 OCR Test Runner")
+    print(f"LAMA Test Runner")
     print(f"{'=' * 50}")
     print(f"Launching {len(modules)} test module(s):")
     for m in modules:

@@ -4,7 +4,7 @@ Sends Ctrl+C to POE2 to copy item data, then reads the clipboard.
 Uses only ctypes (no extra dependencies).
 
 POE2 (like POE1) copies structured item text to clipboard when Ctrl+C is
-pressed while hovering over an item. This is instant and exact — no OCR needed.
+pressed while hovering over an item. This is instant and exact.
 """
 
 import time

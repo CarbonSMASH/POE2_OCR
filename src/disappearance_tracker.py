@@ -170,7 +170,7 @@ def batch_check_listings(listing_ids: List[str],
     if session is None:
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "LAMA-DisappearanceTracker/1.0 (contact: stuart.white28@protonmail.com)",
+            "User-Agent": "LAMA-DisappearanceTracker/1.0 (contact: hello@couloir.gg)",
         })
 
     results = {}
@@ -259,7 +259,7 @@ def recheck_records(input_paths: List[str], min_age_sec: int,
     # Check listings
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "LAMA-DisappearanceTracker/1.0 (contact: stuart.white28@protonmail.com)",
+        "User-Agent": "LAMA-DisappearanceTracker/1.0 (contact: hello@couloir.gg)",
     })
 
     # Get a query_id first (trade API requires it for fetch calls)

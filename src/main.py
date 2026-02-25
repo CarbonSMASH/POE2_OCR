@@ -1423,7 +1423,7 @@ def setup_logging(debug: bool = False):
     """Configure logging.
 
     Console always shows INFO+ only (prices, status, errors).
-    File gets DEBUG when --debug is used (full OCR text, captures, etc.).
+    File gets DEBUG when --debug is used (full item text, captures, etc.).
     This keeps the terminal clean so prices are visible.
     """
     # Ensure log directory exists

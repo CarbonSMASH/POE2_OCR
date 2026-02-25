@@ -2,7 +2,7 @@
 
 **Real-time item pricing for Path of Exile 2 — clipboard-based, zero third-party installs.**
 
-Copy any item with Ctrl+C and instantly see its market value in an overlay. No OCR, no Tesseract, no screen capture. Just clipboard monitoring and poe.ninja lookups.
+Copy any item with Ctrl+C and instantly see its market value in an overlay. Just clipboard monitoring and live market lookups — zero third-party installs.
 
 ---
 
@@ -32,7 +32,7 @@ git clone https://github.com/CouloirGG/lama.git
 
 ### 4. Run it
 
-Open the `POE2_OCR` folder and **double-click `START.bat`** — that's it.
+Open the `lama` folder and **double-click `START.bat`** — that's it.
 
 On first run it will:
 1. Install missing packages (`requests`)
@@ -116,7 +116,7 @@ Alternatively, **double-click `REPORT_BUG.bat`** to zip logs and open a GitHub i
 ## File Structure
 
 ```
-POE2_OCR/
+lama/
 ├── LAMA.bat               # Dashboard GUI launcher (primary)
 ├── START.bat              # CLI launcher (no dashboard)
 ├── SETUP.bat              # One-click setup & install

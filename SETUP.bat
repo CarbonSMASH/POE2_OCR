@@ -16,7 +16,7 @@ echo.
 
 :: ─── Verify script location ─────────────────────────────
 if not exist "%~dp0requirements.txt" (
-    echo   ERROR: SETUP.bat must be in the POE2_OCR folder.
+    echo   ERROR: SETUP.bat must be in the LAMA project folder.
     echo.
     echo   This file needs to be next to requirements.txt,
     echo   main.py, and the other project files.

@@ -80,7 +80,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'pytest', 'cv2', 'pytesseract', 'mss',
+        'pytest', 'cv2', 'mss',
         'matplotlib', 'scipy', 'pandas',
         'notebook', 'IPython',
     ],

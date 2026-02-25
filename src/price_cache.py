@@ -139,7 +139,7 @@ class PriceCache:
                         r = self._adjust_ilvl(r, item_level)
                     return self._enrich(r)
 
-            # Fuzzy match (OCR errors)
+            # Fuzzy match
             for ck, cd in self.prices.items():
                 if self._fuzzy(key, ck):
                     return self._enrich(cd)
@@ -241,7 +241,7 @@ class PriceCache:
 
     def lookup_from_text(self, ocr_text: str) -> Optional[dict]:
         """
-        Try to find a priced item name anywhere in the OCR text.
+        Try to find a priced item name anywhere in the item text.
         Returns enriched price dict or None.
         """
         if not ocr_text:

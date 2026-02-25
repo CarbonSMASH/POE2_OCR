@@ -3,8 +3,7 @@ LAMA - Item Detection via Clipboard
 Monitors cursor position, sends Ctrl+C when cursor stops over POE2,
 and reads the resulting item data from clipboard.
 
-Replaces the OCR pipeline (screen_capture + ocr_engine) with a single
-clipboard read — same approach used by Awakened PoE Trade, ExileExchange2, etc.
+Uses a clipboard read — same approach used by Awakened PoE Trade, ExileExchange2, etc.
 """
 
 import time
@@ -27,7 +26,7 @@ class ItemDetector:
     """
     Detects items under the cursor by sending Ctrl+C when the cursor stops.
     Same cursor-stop logic as ScreenCapture, but triggers a clipboard read
-    instead of a screen capture + OCR.
+    instead of a screen capture.
     """
 
     def __init__(self):

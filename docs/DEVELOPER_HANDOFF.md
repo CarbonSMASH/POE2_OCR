@@ -290,7 +290,7 @@ Sections separated by `--------`. Mod annotations in parentheses: `(implicit)`, 
 - **Monitor:** 3440x1440 ultrawide
 - **POE2:** Windowed Fullscreen
 - **Python:** 3.11
-- **Project path:** `<your_clone_dir>/POE2_OCR`
+- **Project path:** `<your_clone_dir>/lama`
 - **League:** Fate of the Vaal
 - **Debug files:** `~/.poe2-price-overlay/debug/clipboard_*.txt`
 - **Log file:** `~/.poe2-price-overlay/overlay.log`
@@ -379,11 +379,11 @@ Add a subtle "Buy me a coffee" button/link that connects to the user's accounts.
 
 **First time on a new machine:**
 1. Clone: `git clone https://github.com/CouloirGG/lama.git`
-2. `cd POE2_OCR`
+2. `cd lama`
 3. `pip install -r requirements.txt`
 
 **Switching between machines:**
-1. `cd POE2_OCR` → double-click `scripts/SYNC.bat` (or run `git pull && pip install -r requirements.txt`)
+1. `cd lama` → double-click `scripts/SYNC.bat` (or run `git pull && pip install -r requirements.txt`)
 2. This pulls all latest code from GitHub and installs any new deps
 
 **Running the tool:**

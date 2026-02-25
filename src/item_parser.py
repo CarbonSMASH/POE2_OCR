@@ -1,6 +1,6 @@
 """
 LAMA - Item Parser
-Takes raw OCR text from tooltips/nameplates and extracts structured item data.
+Takes raw item text from clipboard and extracts structured item data.
 
 POE2 Tooltip Structure (when hovering):
     Line 1: Item Name (e.g., "Kaom's Heart" or "Stellar Amulet")
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ParsedItem:
-    """Structured item data extracted from OCR text."""
+    """Structured item data extracted from clipboard text."""
     name: str = ""
     base_type: str = ""
     item_class: str = ""  # "Amulets", "Body Armours", etc. from clipboard header
@@ -69,7 +69,7 @@ class ParsedItem:
 
 # ─── Known Item Patterns ─────────────────────────────
 
-# Common currency items (for quick matching without full OCR)
+# Common currency items (for quick matching without full parse)
 CURRENCY_KEYWORDS = {
     "divine orb", "exalted orb", "chaos orb", "mirror of kalandra",
     "orb of alchemy", "orb of alteration", "orb of chance", "orb of fusing",
@@ -126,7 +126,7 @@ WAYSTONE_PATTERN = re.compile(r"(waystone|map)\s*(?:tier)?\s*(\d+)", re.IGNORECA
 class ItemParser:
     """
     Parses item text into structured item data.
-    Supports both clipboard-format text (structured) and legacy OCR text.
+    Supports both clipboard-format text (structured) and legacy plain text.
     """
 
     def parse_clipboard(self, text: str) -> Optional[ParsedItem]:
@@ -245,10 +245,10 @@ class ItemParser:
 
     def parse(self, ocr_text: str, detected_rarity: str = "unknown") -> Optional[ParsedItem]:
         """
-        Parse OCR text into a ParsedItem.
-        
+        Parse item text into a ParsedItem.
+
         Args:
-            ocr_text: Raw text from OCR engine
+            ocr_text: Raw item text from clipboard
             detected_rarity: Rarity inferred from text color (optional)
             
         Returns:
@@ -446,7 +446,7 @@ class ItemParser:
                     item.stack_size = int(match.group(1))
                 return item
 
-            # Partial match (OCR might miss a character)
+            # Partial match (fuzzy tolerance)
             for currency in CURRENCY_KEYWORDS:
                 if self._similar(clean, currency):
                     item = ParsedItem(
@@ -593,7 +593,7 @@ class ItemParser:
         return None
 
     def _similar(self, a: str, b: str, threshold: float = 0.85) -> bool:
-        """Simple string similarity check for OCR error tolerance."""
+        """Simple string similarity check for fuzzy matching."""
         if not a or not b:
             return False
         if abs(len(a) - len(b)) > 3:
@@ -632,8 +632,8 @@ if __name__ == "__main__":
                   f"lookup_key='{result.lookup_key}'")
             print()
 
-    # Legacy OCR format tests
-    print("=== Legacy OCR format tests ===")
+    # Legacy plain-text format tests
+    print("=== Legacy plain-text format tests ===")
     ocr_tests = [
         "Divine Orb\nStack Size: 3",
         "Kaom's Heart\nGlorious Plate\nItem Level: 84",

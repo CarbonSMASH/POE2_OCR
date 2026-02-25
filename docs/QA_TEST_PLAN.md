@@ -176,7 +176,7 @@
 | 8.3 | P1 | Exchange rates | Check status tab stats | Divine→Chaos, Divine→Exalted rates populated | |
 | 8.4 | P1 | Auto-refresh (15m) | Leave running 15+ minutes | "Price cache refreshed" in logs | |
 | 8.5 | P2 | Disk persistence | Stop overlay, restart | Cached prices loaded from disk instantly (no API wait) | |
-| 8.6 | P2 | Name aliases | Hover item with alias (OCR name ≠ API name) | Resolves correctly to cached price | |
+| 8.6 | P2 | Name aliases | Hover item with alias (display name ≠ API name) | Resolves correctly to cached price | |
 | 8.7 | P2 | poe2scout down | Disconnect internet, start overlay | Falls back to disk cache, log warning | |
 
 ---
