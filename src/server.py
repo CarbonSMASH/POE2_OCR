@@ -41,7 +41,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from builds_client import BuildsClient
+from builds_client import (BuildsClient, enrich_item_mods, classify_build,
+                           strip_ninja_brackets)
 from bundle_paths import IS_FROZEN, APP_DIR, get_resource
 from config import TRADE_STATS_CACHE_FILE, TRADE_ITEMS_CACHE_FILE
 from item_lookup import ItemLookup
@@ -1139,7 +1140,21 @@ async def character_lookup(req: CharacterLookupRequest):
         char_data.ascendancy or char_data.char_class, char_data.level,
     )
 
-    return builds_client.serialize_character(char_data)
+    result = builds_client.serialize_character(char_data)
+
+    # Enrich equipment mods with tier data if mod engine is available
+    if item_lookup and item_lookup.ready:
+        try:
+            mp = item_lookup._mod_parser
+            mdb = item_lookup._mod_database
+            for i, eq in enumerate(char_data.equipment):
+                tier_data = enrich_item_mods(eq, mp, mdb)
+                if tier_data and i < len(result.get("equipment", [])):
+                    result["equipment"][i]["modTiers"] = tier_data
+        except Exception as e:
+            logger.debug(f"Mod tier enrichment failed: {e}")
+
+    return result
 
 
 @app.get("/api/character/saved")
@@ -1251,6 +1266,114 @@ async def character_popular_items(req: PopularItemsRequest):
         None, builds_client.get_popular_items_for_slot, char_data, req.slot.strip()
     )
     return result
+
+
+class BuildInsightsRequest(BaseModel):
+    account: str
+    character: str
+
+
+@app.post("/api/character/build-insights")
+async def character_build_insights(req: BuildInsightsRequest):
+    """Classify build archetype and compute per-slot tier summary."""
+    if not req.account.strip() or not req.character.strip():
+        return JSONResponse(status_code=400, content={"error": "Account and character required"})
+    loop = asyncio.get_running_loop()
+
+    # Look up character (cached)
+    char_data = await loop.run_in_executor(
+        None, builds_client.lookup_character, req.account.strip(), req.character.strip()
+    )
+    if not char_data:
+        return JSONResponse(status_code=404, content={"error": "Character not found"})
+
+    # Classify build
+    archetype = classify_build(char_data)
+
+    # Fetch popular keystones
+    char_class = char_data.ascendancy or char_data.char_class
+    main_skill = archetype.main_skill
+    popular_ks = await loop.run_in_executor(
+        None, builds_client.fetch_popular_keystones, char_class, main_skill
+    )
+
+    # Compare user's keystones vs popular
+    user_ks_set = set(char_data.keystones)
+    keystone_gaps = []
+    for pks in popular_ks[:10]:
+        keystone_gaps.append({
+            "name": pks["name"],
+            "percentage": pks["percentage"],
+            "hasIt": pks["name"] in user_ks_set,
+        })
+
+    # Per-slot tier summary from enriched mod data
+    slot_summary = []
+    if item_lookup and item_lookup.ready:
+        try:
+            mp = item_lookup._mod_parser
+            mdb = item_lookup._mod_database
+            for eq in char_data.equipment:
+                tier_data = enrich_item_mods(eq, mp, mdb)
+                # Flatten all tier results across mod types
+                all_tiers = []
+                for mod_type_key, tiers in tier_data.items():
+                    for t in tiers:
+                        if t is not None:
+                            all_tiers.append(t)
+
+                t1_count = sum(1 for t in all_tiers if t["tier_num"] == 1)
+                mod_count = sum(
+                    len(m_list) for m_list in [
+                        eq.implicit_mods, eq.explicit_mods, eq.crafted_mods,
+                        eq.fractured_mods, eq.desecrated_mods, eq.rune_mods,
+                    ] if m_list
+                )
+                avg_tier = 0
+                if all_tiers:
+                    avg_tier = round(sum(t["tier_num"] for t in all_tiers) / len(all_tiers), 1)
+
+                # Find weakest mod (highest tier number)
+                weakest = None
+                if all_tiers:
+                    worst = max(all_tiers, key=lambda t: t["tier_num"])
+                    weakest = {
+                        "display_name": worst["display_name"],
+                        "tier_num": worst["tier_num"],
+                        "tier_count": worst["tier_count"],
+                    }
+
+                from builds_client import SLOT_DISPLAY
+                slot_summary.append({
+                    "slot": eq.slot,
+                    "slotDisplay": SLOT_DISPLAY.get(eq.slot, eq.slot),
+                    "itemName": eq.name or eq.type_line,
+                    "avgTier": avg_tier,
+                    "t1Count": t1_count,
+                    "modCount": mod_count,
+                    "enrichedCount": len(all_tiers),
+                    "weakest": weakest,
+                })
+        except Exception as e:
+            logger.debug(f"Slot summary failed: {e}")
+
+    return {
+        "archetype": {
+            "tags": archetype.tags,
+            "damageType": archetype.damage_type,
+            "defenseType": archetype.defense_type,
+            "mainSkill": archetype.main_skill,
+            "isCrit": archetype.is_crit,
+            "isCoc": archetype.is_coc,
+            "elements": archetype.elements,
+            "deadMods": archetype.dead_mods,
+        },
+        "keystoneGaps": {
+            "user": list(char_data.keystones),
+            "popular": keystone_gaps,
+        },
+        "slotSummary": slot_summary,
+    }
 
 
 # ---------------------------------------------------------------------------

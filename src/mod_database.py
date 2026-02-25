@@ -808,6 +808,75 @@ class ModDatabase:
             return (f"T{tier.tier_num}", tier)
         return ("", None)
 
+    def get_full_tier_data(self, stat_id: str, value: float,
+                           item_class: str) -> Optional[dict]:
+        """Rich tier lookup for external callers (e.g. build insights).
+
+        Returns dict with:
+            tier_num, tier_count, roll_quality (0-1),
+            tier_range: {min, max}, next_tier: {min, max} or None,
+            group, generation_type, weight, display_name
+        or None if stat_id is unknown.
+        """
+        bridge_entry = self._bridge.get(stat_id)
+        if not bridge_entry:
+            return None
+
+        group, gen_type = bridge_entry
+
+        ladder = self._ladders.get((group, item_class))
+        if not ladder:
+            # Try all item classes for this group
+            for (g, ic), lad in self._ladders.items():
+                if g == group:
+                    ladder = lad
+                    break
+        if not ladder:
+            return None
+
+        tier = ladder.identify_tier(value)
+        if not tier:
+            return None
+
+        # Roll quality within tier
+        t_min = min(abs(tier.stat_min), abs(tier.stat_max))
+        t_max = max(abs(tier.stat_min), abs(tier.stat_max))
+        if t_max > t_min:
+            roll_quality = (abs(value) - t_min) / (t_max - t_min)
+            roll_quality = max(0.0, min(1.0, roll_quality))
+        else:
+            roll_quality = 1.0
+
+        # Next tier up (tier N-1, i.e. better tier)
+        next_tier = None
+        if tier.tier_num > 1:
+            for t in ladder.tiers:
+                if t.tier_num == tier.tier_num - 1:
+                    next_tier = {
+                        "min": min(abs(t.stat_min), abs(t.stat_max)),
+                        "max": max(abs(t.stat_min), abs(t.stat_max)),
+                    }
+                    break
+
+        # Weight
+        w = _get_weight_for_group(group)
+        weight = w if w is not None else 1.0
+
+        return {
+            "tier_num": tier.tier_num,
+            "tier_count": len(ladder.tiers),
+            "roll_quality": round(roll_quality, 3),
+            "tier_range": {
+                "min": min(abs(tier.stat_min), abs(tier.stat_max)),
+                "max": max(abs(tier.stat_min), abs(tier.stat_max)),
+            },
+            "next_tier": next_tier,
+            "group": group,
+            "generation_type": gen_type,
+            "weight": weight,
+            "display_name": _display_name(group),
+        }
+
     def get_stats(self) -> dict:
         """Diagnostics: bridge size, ladder count, etc."""
         return {

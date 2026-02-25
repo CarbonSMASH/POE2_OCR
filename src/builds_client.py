@@ -13,6 +13,7 @@ Endpoints used:
 """
 
 import logging
+import re
 import struct
 import threading
 import time
@@ -837,3 +838,496 @@ class BuildsClient:
                 "runeMods": current_item.rune_mods,
             } if current_item else None,
         }
+
+    # -------------------------------------------------------------------
+    # Popular keystones search (protobuf)
+    # -------------------------------------------------------------------
+
+    def fetch_popular_keystones(self, char_class: str,
+                                 skill: str) -> List[Dict[str, Any]]:
+        """Fetch popular keystones for a class+skill from poe.ninja.
+
+        Returns list of {name, count, percentage} sorted by count desc.
+        """
+        if not self._fetch_snapshot_info():
+            return []
+
+        cache_key = f"keystones-{self._snapshot_version}-{char_class}-{skill}"
+        cached = self._get_cached(cache_key, TTL_SEARCH)
+        if cached is not None:
+            return cached
+
+        try:
+            search = self._fetch_search(char_class, skill)
+            if not search:
+                return []
+
+            ks_dim = None
+            for dim in search["dimensions"]:
+                if dim["name"] == "keystones":
+                    ks_dim = dim
+                    break
+            if not ks_dim:
+                return []
+
+            dict_hash = (search["dictHashes"].get("keystone") or
+                         search["dictHashes"].get(ks_dim.get("displayName", "")))
+            if not dict_hash:
+                return []
+
+            dictionary = self._fetch_dictionary(dict_hash)
+            if not dictionary:
+                return []
+
+            total = search["totalCount"] or 1
+            result = []
+            for entry in ks_dim["entries"]:
+                key = entry["key"]
+                if key >= len(dictionary["names"]):
+                    continue
+                name = dictionary["names"][key]
+                if not name:
+                    continue
+                result.append({
+                    "name": name,
+                    "count": entry["count"],
+                    "percentage": round((entry["count"] / total) * 100, 1),
+                })
+
+            result.sort(key=lambda x: x["count"], reverse=True)
+            result = result[:20]
+            self._set_cache(cache_key, result)
+            return result
+
+        except Exception as e:
+            logger.warning(f"Popular keystones fetch failed: {e}")
+            return []
+
+
+# ---------------------------------------------------------------------------
+# Bracket-stripping utility (poe.ninja mod text: [tag|display] → display)
+# ---------------------------------------------------------------------------
+_NINJA_BRACKET_RE = re.compile(r"\[([^|\]]*\|)?([^\]]*)\]")
+
+
+def strip_ninja_brackets(text: str) -> str:
+    """Strip poe.ninja [tag|display] → display from mod text."""
+    return _NINJA_BRACKET_RE.sub(r"\2", text)
+
+
+# ---------------------------------------------------------------------------
+# Slot → RePoE item class mapping
+# ---------------------------------------------------------------------------
+SLOT_TO_ITEM_CLASS = {
+    "Helm": "Helmet",
+    "BodyArmour": "Body Armour",
+    "Gloves": "Gloves",
+    "Boots": "Boots",
+    "Belt": "Belt",
+    "Amulet": "Amulet",
+    "Ring": "Ring",
+    "Ring2": "Ring",
+    "Shield": "Shield",
+    "Offhand": "Shield",    # default; weapons resolved by type_line
+    "Flask": "Flask",
+}
+
+# type_line keywords → item class for weapons
+_WEAPON_TYPE_HINTS = {
+    "Bow": "Bows", "Crossbow": "Crossbows", "Wand": "Wands",
+    "Staff": "Staves", "Warstaff": "Warstaves", "Sceptre": "Sceptres",
+    "Dagger": "Daggers", "Claw": "Claws",
+    "Sword": "One Hand Swords", "Axe": "One Hand Axes",
+    "Mace": "One Hand Maces", "Flail": "Flails", "Spear": "Spears",
+    "Quiver": "Quivers", "Focus": "Foci", "Buckler": "Bucklers",
+}
+
+
+def _resolve_item_class(slot: str, type_line: str = "") -> str:
+    """Resolve poe.ninja inventoryId + typeLine to a RePoE item class."""
+    if slot in ("Weapon", "Weapon2", "Offhand", "Offhand2"):
+        tl = type_line.lower()
+        for hint, cls in _WEAPON_TYPE_HINTS.items():
+            if hint.lower() in tl:
+                return cls
+        # "Two Hand" prefix
+        if "two hand" in tl:
+            if "sword" in tl:
+                return "Two Hand Swords"
+            if "axe" in tl:
+                return "Two Hand Axes"
+            if "mace" in tl:
+                return "Two Hand Maces"
+    return SLOT_TO_ITEM_CLASS.get(slot, slot)
+
+
+# ---------------------------------------------------------------------------
+# Mod enrichment — adds tier data to character equipment mods
+# ---------------------------------------------------------------------------
+
+# Mod types and their corresponding mod_parser type labels
+_MOD_TYPE_MAP = {
+    "implicit_mods": "implicit",
+    "explicit_mods": "explicit",
+    "crafted_mods": "explicit",
+    "fractured_mods": "explicit",
+    "desecrated_mods": "explicit",
+    "enchant_mods": "enchant",
+    "rune_mods": "explicit",
+}
+
+
+def enrich_item_mods(item: 'CharacterItem', mod_parser, mod_database) -> Dict[str, list]:
+    """Enrich a CharacterItem's mods with tier data.
+
+    Returns dict keyed by mod type ("implicitMods", "explicitMods", etc.)
+    with parallel arrays of tier info dicts (or None for unmatched mods).
+    """
+    item_class = _resolve_item_class(item.slot, item.type_line)
+    result = {}
+
+    mod_type_pairs = [
+        ("implicitMods", item.implicit_mods, "implicit"),
+        ("explicitMods", item.explicit_mods, "explicit"),
+        ("craftedMods", item.crafted_mods, "explicit"),
+        ("fracturedMods", item.fractured_mods, "explicit"),
+        ("desecratedMods", item.desecrated_mods, "explicit"),
+        ("enchantMods", item.enchant_mods, "enchant"),
+        ("runeMods", item.rune_mods, "explicit"),
+    ]
+
+    for key, mods, parse_type in mod_type_pairs:
+        if not mods:
+            continue
+        tiers = []
+        for mod_text in mods:
+            tier_data = _enrich_single_mod(mod_text, parse_type, item_class,
+                                            mod_parser, mod_database)
+            tiers.append(tier_data)
+        result[key] = tiers
+
+    return result
+
+
+def _enrich_single_mod(mod_text: str, mod_type: str, item_class: str,
+                        mod_parser, mod_database) -> Optional[dict]:
+    """Try to enrich a single mod line with tier data."""
+    try:
+        clean = strip_ninja_brackets(mod_text)
+        parsed = mod_parser._match_mod(clean, mod_type)
+        if not parsed or not parsed.stat_id:
+            return None
+        return mod_database.get_full_tier_data(parsed.stat_id, parsed.value,
+                                                item_class)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Build classification (ported from lama-mobile BuildsScreen.tsx)
+# ---------------------------------------------------------------------------
+
+ATTACK_SKILLS = frozenset([
+    # Melee
+    "Power Siphon", "Boneshatter", "Earthquake", "Ground Slam", "Sunder",
+    "Heavy Strike", "Glacial Hammer", "Lightning Strike", "Molten Strike",
+    "Viper Strike", "Double Strike", "Dual Strike", "Cleave", "Lacerate",
+    "Cyclone", "Flicker Strike", "Whirling Slash", "Shield Charge",
+    "Leap Slam", "Consecrated Path", "Tectonic Slam", "Perforate",
+    "Bladestorm", "Chain Hook", "Static Strike", "Smite",
+    "Splitting Steel", "Shattering Steel", "Lancing Steel",
+    "Mace Bash", "Spinning Assault", "Pounce",
+    "Ice Strike", "Quarterstaff Strike", "Shred",
+    "Rampage", "Hammer of the Gods", "Furious Slam", "Maul",
+    "Shield Wall", "Gathering Storm",
+    "Whirling Assault", "Devour", "Seismic Cry", "Primal Strikes",
+    "Fangs of Frost", "Storm Wave", "Falling Thunder",
+    # Ranged - Bow
+    "Split Arrow", "Lightning Arrow", "Ice Shot", "Burning Arrow",
+    "Tornado Shot", "Rain of Arrows", "Barrage", "Caustic Arrow",
+    "Scourge Arrow", "Galvanic Arrow", "Artillery Ballista",
+    "Shrapnel Ballista", "Siege Ballista", "Explosive Arrow",
+    "Power Shot", "Gas Arrow", "Rend", "Bow Shot", "Oil Barrage",
+    "Rapid Shot", "Focused Shot", "Snipe",
+    "Poisonburst Arrow", "Vine Arrow",
+    # Crossbow
+    "Bolt Burst", "Crossbow Shot", "Armour Piercing Rounds",
+    "Plasma Blast", "Explosive Grenade", "Oil Grenade",
+    "Galvanic Shards", "Stormblast Bolts",
+])
+
+SPELL_SKILLS = frozenset([
+    # Cold
+    "Comet", "Ice Nova", "Frost Bolt", "Frostbolt", "Glacial Cascade",
+    "Arctic Breath", "Freezing Pulse", "Cold Snap", "Vortex", "Winter Orb",
+    "Frost Wall", "Frozen Orb", "Ice Spear",
+    "Frost Bomb", "Snap", "Freezing Shards",
+    # Fire
+    "Fireball", "Fire Ball", "Incinerate", "Flame Wall", "Fire Trap",
+    "Flammability", "Flame Surge", "Flame Bolt", "Living Bomb",
+    "Infernal Cry",
+    # Lightning
+    "Arc", "Ball Lightning", "Storm Call", "Lightning Tendrils",
+    "Spark", "Shock Nova", "Lightning Conduit", "Galvanic Field",
+    "Conductivity", "Orb of Storms", "Storm Bolt", "Lightning Spear",
+    "Lightning Rod", "Thunderstorm", "Lightning Warp",
+    # Chaos
+    "Blight", "Essence Drain", "Contagion", "Soulrend", "Bane",
+    "Dark Pact", "Forbidden Rite", "Chaos Bolt", "Hexblast",
+    "Entangle", "Requiem", "Toxic Growth", "Thrashing Vines",
+    # Nature / Druid
+    "Twister",
+    # Physical / generic
+    "Blade Vortex", "Ethereal Knives", "Bladefall", "Blade Blast",
+    "Reap", "Exsanguinate", "Rolling Magma", "Magma Orb",
+    "Bone Offering", "Spirit Offering", "Flesh Offering",
+    "Raise Zombie", "Summon Skeletons", "Summon Raging Spirit",
+    "Summon Phantasm", "Raise Spectre",
+    "Unearth", "Desecrate", "Spirit Nova",
+])
+
+MINION_SKILLS = frozenset([
+    "Raise Zombie", "Summon Skeletons", "Summon Raging Spirit",
+    "Summon Phantasm", "Raise Spectre", "Animate Weapon",
+    "Dominate", "Summon Reaper", "Summon Volatile Dead",
+])
+
+MELEE_SKILLS = frozenset([
+    "Sunder", "Heavy Strike", "Glacial Hammer", "Molten Strike", "Cyclone",
+    "Flicker Strike", "Whirling Slash", "Shield Charge", "Leap Slam",
+    "Tectonic Slam", "Perforate", "Bladestorm", "Static Strike", "Smite",
+    "Mace Bash", "Spinning Assault", "Pounce", "Ice Strike",
+    "Quarterstaff Strike", "Shred", "Rampage", "Hammer of the Gods",
+    "Furious Slam", "Maul", "Shield Wall", "Gathering Storm",
+    "Boneshatter", "Earthquake", "Ground Slam", "Lacerate", "Cleave",
+    "Whirling Assault", "Devour", "Seismic Cry", "Primal Strikes",
+    "Fangs of Frost", "Storm Wave", "Falling Thunder",
+])
+
+CRIT_KEYSTONES = frozenset([
+    "Inevitable Judgement", "Elemental Overload", "Precision",
+    "Deadly Precision", "Assassin's Mark", "Nightblade",
+])
+
+ES_KEYSTONES = frozenset([
+    "Chaos Inoculation", "Ghost Reaver", "Wicked Ward",
+    "Arcane Surge", "Pain Attunement", "Energy Blade",
+])
+
+_ELEMENT_KEYWORDS = [
+    ("fire", [re.compile(p, re.I) for p in [
+        r"\bfire\b", r"\bburn", r"\bignite", r"\bincinerate", r"\bflame",
+        r"\binfernal", r"\bliving bomb", r"\boil barrage"]]),
+    ("cold", [re.compile(p, re.I) for p in [
+        r"\bcold\b", r"\bfreez", r"\bfrost", r"\bice\b", r"\bglacial",
+        r"\bwinter", r"\bcomet\b", r"\bsnap\b", r"\bfangs of frost"]]),
+    ("lightning", [re.compile(p, re.I) for p in [
+        r"\blightning\b", r"\bshock", r"\barc\b", r"\bspark\b",
+        r"\bgalvanic", r"\bstorm", r"\bconducti", r"\bthunder"]]),
+    ("chaos", [re.compile(p, re.I) for p in [
+        r"\bchaos\b", r"\bpoison", r"\bviper", r"\bblight",
+        r"\bwither", r"\bhexblast", r"\bentangle", r"\brequiem",
+        r"\btoxic", r"\bthrashing vines"]]),
+    ("physical", [re.compile(p, re.I) for p in [
+        r"\bphysical\b", r"\bbleed", r"\bimpale", r"\bsteel\b",
+        r"\bbone\b", r"\brampage\b", r"\bsunder\b", r"\bhammer\b",
+        r"\bmaul\b", r"\bshred\b", r"\btwister\b", r"\bdevour\b",
+        r"\bseismic"]]),
+]
+
+# Dead mod patterns for classification
+_DEAD_MOD_ATTACK = [
+    (re.compile(r"increased Spell Damage", re.I), "spell damage doesn't help attack builds"),
+    (re.compile(r"increased Cast Speed", re.I), "cast speed doesn't help attack builds"),
+    (re.compile(r"adds \d+ to \d+ .* Damage to Spells", re.I), "flat spell damage doesn't help attack builds"),
+]
+_DEAD_MOD_SPELL = [
+    (re.compile(r"increased Attack Speed", re.I), "attack speed doesn't help spell builds"),
+    (re.compile(r"adds \d+ to \d+ .* Damage to Attacks", re.I), "flat attack damage doesn't help spell builds"),
+]
+_DEAD_MOD_UNIVERSAL = [
+    (re.compile(r"Allies in your Presence", re.I), "party/mount mod"),
+    (re.compile(r"increased Rarity of Items found", re.I), "rarity mod — wasted affix slot"),
+]
+
+
+@dataclass
+class BuildArchetype:
+    """Concise classification of a build."""
+    tags: List[str] = field(default_factory=list)
+    damage_type: str = "unknown"   # attack / spell / mixed / unknown
+    defense_type: str = "life"     # life / es / hybrid / mom
+    main_skill: str = ""
+    is_crit: bool = False
+    is_coc: bool = False
+    elements: List[str] = field(default_factory=list)
+    dead_mods: List[Dict[str, str]] = field(default_factory=list)
+
+
+def classify_build(char: CharacterData) -> BuildArchetype:
+    """Classify a build's archetype from character data.
+
+    Determines damage type, defense strategy, elements, crit, CoC,
+    and identifies dead mod patterns.
+    """
+    # Find main skill by highest damage
+    main_skill = ""
+    main_dps = 0
+    for sg in char.skill_groups:
+        for d in sg.dps:
+            effective = d.dps if d.dps > 0 else d.damage
+            if effective > main_dps:
+                main_dps = effective
+                main_skill = d.name
+
+    # Fallback: first gem in first skill group
+    if not main_skill and char.skill_groups:
+        gems = char.skill_groups[0].gems
+        if gems:
+            main_skill = gems[0]
+
+    # Detect Cast on Crit
+    is_coc = False
+    for sg in char.skill_groups:
+        has_coc = any("Cast on Crit" in g or "Cast when Crit" in g for g in sg.gems)
+        has_attack = any(g in ATTACK_SKILLS for g in sg.gems)
+        has_spell = any(g in SPELL_SKILLS for g in sg.gems)
+        if has_coc and has_attack and has_spell:
+            is_coc = True
+            break
+    # Heuristic: spell DPS + attack gem in same group
+    if not is_coc and main_skill in SPELL_SKILLS:
+        for sg in char.skill_groups:
+            has_dps = any(d.name == main_skill for d in sg.dps)
+            has_attack = any(g in ATTACK_SKILLS for g in sg.gems)
+            if has_dps and has_attack:
+                is_coc = True
+                break
+
+    # Damage type
+    if main_skill in MINION_SKILLS:
+        damage_type = "spell"
+    elif main_skill in SPELL_SKILLS:
+        damage_type = "spell"
+    elif main_skill in ATTACK_SKILLS:
+        damage_type = "attack"
+    else:
+        # Heuristic: count attack vs spell mods on gear
+        atk_count = 0
+        spell_count = 0
+        for eq in char.equipment:
+            mods = " ".join(
+                strip_ninja_brackets(m)
+                for m_list in [eq.explicit_mods, eq.implicit_mods, eq.crafted_mods]
+                for m in (m_list or [])
+            ).lower()
+            if "attack speed" in mods:
+                atk_count += 1
+            if "spell" in mods or "cast speed" in mods:
+                spell_count += 1
+        if atk_count > spell_count:
+            damage_type = "attack"
+        elif spell_count > atk_count:
+            damage_type = "spell"
+        elif atk_count > 0 and spell_count > 0:
+            damage_type = "mixed"
+        else:
+            damage_type = "unknown"
+
+    # Elements
+    elements = set()
+    for elem, patterns in _ELEMENT_KEYWORDS:
+        for pat in patterns:
+            if pat.search(main_skill):
+                elements.add(elem)
+    if damage_type == "attack" and not elements:
+        elements.add("physical")
+    if not elements and damage_type == "spell":
+        # Check all skill gem names
+        for sg in char.skill_groups:
+            for gem in sg.gems:
+                for elem, patterns in _ELEMENT_KEYWORDS:
+                    for pat in patterns:
+                        if pat.search(gem):
+                            elements.add(elem)
+    if not elements:
+        elements.add("physical")
+
+    # Crit detection
+    is_crit = is_coc  # CoC is always crit
+    if not is_crit:
+        is_crit = any(k in CRIT_KEYSTONES for k in char.keystones)
+    if not is_crit:
+        for eq in char.equipment:
+            mods = " ".join(
+                strip_ninja_brackets(m)
+                for m_list in [eq.explicit_mods, eq.implicit_mods,
+                               eq.crafted_mods, eq.fractured_mods, eq.rune_mods]
+                for m in (m_list or [])
+            )
+            if re.search(r"Critical Hit Chance|Critical Damage Bonus", mods, re.I):
+                is_crit = True
+                break
+
+    # Defense type
+    has_ci = "Chaos Inoculation" in char.keystones
+    has_mom = "Mind Over Matter" in char.keystones
+    has_eb = "Eldritch Battery" in char.keystones
+    if has_ci:
+        defense_type = "es"
+    elif has_mom and has_eb:
+        defense_type = "mom"
+    elif any(k in ES_KEYSTONES for k in char.keystones):
+        defense_type = "hybrid"
+    else:
+        defense_type = "life"
+
+    # Dead mods
+    dead_mods = []
+    if damage_type == "spell" and not is_coc:
+        dead_mods.extend(_DEAD_MOD_SPELL)
+    if damage_type == "attack" and not is_coc:
+        dead_mods.extend(_DEAD_MOD_ATTACK)
+
+    # Scan equipment for dead mods
+    found_dead = []
+    for eq in char.equipment:
+        # Skip weapons — too complex
+        if eq.slot in ("Weapon", "Weapon2"):
+            continue
+        all_mods = []
+        for m_list in [eq.explicit_mods, eq.crafted_mods, eq.enchant_mods]:
+            for m in (m_list or []):
+                all_mods.append(strip_ninja_brackets(m))
+        for mod_text in all_mods:
+            for pat, reason in dead_mods + _DEAD_MOD_UNIVERSAL:
+                if pat.search(mod_text):
+                    found_dead.append({
+                        "slot": eq.slot,
+                        "mod": mod_text,
+                        "reason": reason,
+                    })
+                    break
+
+    # Build tags
+    tags = []
+    if damage_type != "unknown":
+        tags.append(damage_type)
+    for elem in sorted(elements):
+        tags.append(elem)
+    if is_coc:
+        tags.append("CoC")
+    elif is_crit:
+        tags.append("crit")
+    tags.append(defense_type)
+
+    return BuildArchetype(
+        tags=tags,
+        damage_type=damage_type,
+        defense_type=defense_type,
+        main_skill=main_skill,
+        is_crit=is_crit,
+        is_coc=is_coc,
+        elements=sorted(elements),
+        dead_mods=found_dead,
+    )
