@@ -244,6 +244,23 @@ Sections separated by `--------`. Mod annotations in parentheses: `(implicit)`, 
 
 **Key files touched per estimate:** `main.py` extracts `mod_tiers` from `score.mod_scores` → passes to `calibration.estimate()` → tries all 3 methods in priority order. Same for `pricing_engine.py` and `item_lookup.py`.
 
+### Harvester Reliability (`calibration_harvester.py`, `elite_harvester.py`)
+
+**Multi-pass architecture:**
+- Standard harvester: passes 1-5 use PRIMARY_BRACKETS, 6-10 STAGGER_BRACKETS, 11+ MICRO_BRACKETS
+- Offset resets per bracket set: `pass_within_set = (pass_num - 1) % 5`, offset = `pass_within_set * FETCH_BATCH_SIZE`
+- Elite harvester: linear offset `(pass_num - 1) * FETCH_BATCH_SIZE_ELITE`
+
+**Critical constraint:** Trade API returns ~10 IDs per search, not 50. All offset stepping must use `FETCH_BATCH_SIZE` (10), never `RESULTS_PER_QUERY` (50), or pass 2+ will slice past all results and return zero items.
+
+**Error recovery policy (fixed 2026-02-25):**
+- HTTP errors, search exceptions, and fetch failures are **NOT** marked as completed — they will be retried on the next run
+- Only queries that genuinely returned zero results or produced data are marked completed
+- `retryable` counter in the end-of-run summary shows how many queries were lost to transient errors
+- `dead_combos` list permanently marks category/bracket pairs that returned 0 results at offset 0
+
+**State files:** `~/.poe2-price-overlay/harvester_state_p{N}.json` and `elite_harvester_state_p{N}.json` — track completed queries, dead combos, and total samples per pass.
+
 ### Item Detection (`item_detection.py`)
 - Polls cursor position at 8 fps
 - Triggers Ctrl+C when cursor is still for 3 frames within 20px radius
@@ -321,6 +338,7 @@ Sections separated by `--------`. Mod annotations in parentheses: `(implicit)`, 
 3. ~~**Magic items without base_type**~~ — Fixed: `ModParser.resolve_base_type()` fetches all base types from the trade API items endpoint
 4. **Common mod classification** is heuristic-based — may occasionally misclassify an unusual valuable mod as "common"
 5. ~~**README.md is outdated**~~ — Fixed: rewritten for clipboard-based architecture
+6. ~~**Harvester pass 2+ returning zero results**~~ — Fixed: elite harvester offset stepped by 50 instead of 10; failed queries were permanently marked "completed" instead of retried
 
 ## Bugs Fixed This Session (2026-02-15)
 1. Mod annotations (`(implicit)`, `(rune)`, etc.) not stripped before regex matching
