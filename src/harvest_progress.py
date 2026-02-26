@@ -16,7 +16,6 @@ def show():
 
     for p in range(1, 16):
         state_file = CACHE / f"harvester_state_p{p}.json"
-        shard_file = CACHE / f"calibration_shard_fate_of_the_vaal_{today}_p{p}.jsonl"
 
         if not state_file.exists():
             continue
@@ -28,11 +27,16 @@ def show():
         samples = state.get("total_samples", 0)
         dead = len(state.get("dead_combos", []))
 
-        # Check shard file line count for actual records
+        # Find the shard file by seed date (not today's date).
+        # The seed is "{date}:p{pass}" — extract the date portion.
+        seed = state.get("query_plan_seed", "")
+        seed_date = seed.split(":")[0] if seed else ""
         shard_lines = 0
-        if shard_file.exists():
-            with open(shard_file) as f:
-                shard_lines = sum(1 for _ in f)
+        if seed_date:
+            shard_file = CACHE / f"calibration_shard_fate_of_the_vaal_{seed_date}_p{p}.jsonl"
+            if shard_file.exists():
+                with open(shard_file) as f:
+                    shard_lines = sum(1 for _ in f)
 
         pct = done / QUERIES_PER_PASS * 100 if QUERIES_PER_PASS else 0
         bar_width = 30
