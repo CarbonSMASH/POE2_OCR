@@ -338,21 +338,59 @@ def _detect_class_ascendancy(text: str) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 MAXROLL_PLANNER_API = "https://planners.maxroll.gg/profiles/poe2"
 
-# Maxroll internal class codes → display names
-_MAXROLL_CLASS_MAP = {
-    "IntFour": ("Witch", "Infernalist"),
-    "IntThree": ("Witch", "Blood Mage"),
-    "StrFour": ("Warrior", "Warbringer"),
-    "StrThree": ("Warrior", "Titan"),
-    "DexFour": ("Ranger", "Pathfinder"),
-    "DexThree": ("Ranger", "Deadeye"),
-    "StrDexFour": ("Mercenary", "Gemling Legionnaire"),
-    "StrDexThree": ("Mercenary", "Witchhunter"),
-    "DexIntFour": ("Monk", "Invoker"),
-    "DexIntThree": ("Monk", "Acolyte of Chayula"),
-    "StrIntFour": ("Sorceress", "Stormweaver"),
-    "StrIntThree": ("Sorceress", "Chronomancer"),
+# Maxroll planner ascendancy field → (base class, ascendancy display name)
+# Format is "{BaseClass}{Number}" e.g. "Witch1", "Warrior1", "Druid2"
+_MAXROLL_ASC_MAP = {
+    "Witch1": ("Witch", "Infernalist"),
+    "Witch2": ("Witch", "Blood Mage"),
+    "Warrior1": ("Warrior", "Titan"),
+    "Warrior2": ("Warrior", "Warbringer"),
+    "Ranger1": ("Ranger", "Deadeye"),
+    "Ranger2": ("Ranger", "Deadeye"),       # fallback
+    "Ranger3": ("Ranger", "Pathfinder"),
+    "Mercenary1": ("Mercenary", "Witchhunter"),
+    "Mercenary2": ("Mercenary", "Gemling Legionnaire"),
+    "Monk1": ("Monk", "Acolyte of Chayula"),
+    "Monk2": ("Monk", "Invoker"),
+    "Sorceress1": ("Sorceress", "Chronomancer"),
+    "Sorceress2": ("Sorceress", "Stormweaver"),
+    # Last of the Druids expansion classes
+    "Druid1": ("Druid", "Oracle"),
+    "Druid2": ("Druid", "Shaman"),
+    "Huntress1": ("Huntress", "Amazon"),
+    "Huntress2": ("Huntress", "Beastmaster"),
 }
+
+# Fallback: class code prefix → base class name
+_MAXROLL_CLASS_PREFIX = {
+    "Int": "Witch",
+    "Str": "Warrior",
+    "Dex": "Ranger",
+    "StrDex": "Mercenary",
+    "DexInt": "Monk",
+    "StrInt": "Sorceress",
+}
+
+
+def _resolve_maxroll_class(class_code: str, asc_field: str) -> Optional[tuple]:
+    """Resolve class + ascendancy from Maxroll planner fields."""
+    # Primary: use the explicit ascendancy field
+    if asc_field and asc_field in _MAXROLL_ASC_MAP:
+        return _MAXROLL_ASC_MAP[asc_field]
+
+    # Fallback: extract base class from the ascendancy field pattern
+    if asc_field:
+        m = re.match(r"([A-Za-z]+?)(\d+)$", asc_field)
+        if m:
+            base = m.group(1)
+            # Return base class with ascendancy as-is
+            return (base, asc_field)
+
+    # Last resort: use class code prefix
+    for prefix, cls_name in sorted(_MAXROLL_CLASS_PREFIX.items(), key=lambda x: len(x[0]), reverse=True):
+        if class_code.startswith(prefix):
+            return (cls_name, "")
+    return None
 
 # Maxroll equipment slot keys → normalized slot names
 _MAXROLL_SLOT_MAP = {
@@ -536,8 +574,12 @@ class MaxrollParser:
 
         # Class/Ascendancy from planner (more reliable than HTML)
         class_code = planner.get("class", "")
-        if class_code in _MAXROLL_CLASS_MAP:
-            guide.char_class, guide.ascendancy = _MAXROLL_CLASS_MAP[class_code]
+        asc_field = planner.get("ascendancy", "")
+        if isinstance(asc_field, dict):
+            asc_field = ""  # Sometimes it's an object, not a string
+        resolved = _resolve_maxroll_class(class_code, asc_field)
+        if resolved:
+            guide.char_class, guide.ascendancy = resolved
 
         # Build stages from gearing variants (most reliable stage source)
         equipment = planner.get("equipment", {})
