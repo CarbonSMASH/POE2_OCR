@@ -56,10 +56,11 @@ _GRADE_NUM = {"S": 4, "A": 3, "B": 2, "C": 1, "JUNK": 0}
 #  [19] pdps               float   physical DPS
 #  [20] edps               float   elemental DPS
 #  [21] sale_confidence    float   disappearance-based confidence (3.0=sold, 1.0=unknown, 0.3=stale)
+#  [22] mod_stats_tuple    Tuple[Tuple[str, float], ...]  sorted (stat_id, value) pairs
 Sample = Tuple[float, float, int, float, float, int, int, int, bool,
                Tuple[str, ...], str, float, int, Tuple[Tuple[str, int], ...],
                float, float, float, float, Tuple[Tuple[str, float], ...],
-               float, float, float]
+               float, float, float, Tuple[Tuple[str, float], ...]]
 
 
 class CalibrationEngine:
@@ -227,6 +228,7 @@ class CalibrationEngine:
                     rec_pdps = rec.get("pdps", 0.0)
                     rec_edps = rec.get("edps", 0.0)
                     rec_sc = rec.get("sale_confidence", 1.0)
+                    rec_mod_stats = rec.get("mod_stats", {})
                     self._insert(float(score), float(divine),
                                  item_class, grade_num,
                                  dps_factor, defense_factor,
@@ -239,7 +241,8 @@ class CalibrationEngine:
                                  somv_factor=rec_somv,
                                  mod_rolls=mod_rolls,
                                  pdps=rec_pdps, edps=rec_edps,
-                                 sale_confidence=rec_sc)
+                                 sale_confidence=rec_sc,
+                                 mod_stats=rec_mod_stats)
                     count += 1
         except Exception as e:
             logger.warning(f"Calibration: load error: {e}")
@@ -289,6 +292,9 @@ class CalibrationEngine:
             # Load base type index (v4+ shards)
             base_index = shard.get("base_index", [])
 
+            # Load stat index (v8+ shards)
+            stat_index = shard.get("stat_index", [])
+
             count = 0
             for s in samples:
                 score = s.get("s")
@@ -326,6 +332,15 @@ class CalibrationEngine:
                         if idx in idx_to_group and mr_arr[j] >= 0:
                             mod_rolls_dict[idx_to_group[idx]] = mr_arr[j]
 
+                # Reconstruct mod_stats from stat index arrays (v8+)
+                ms_arr = s.get("ms", [])
+                mv_arr = s.get("mv", [])
+                mod_stats_dict = {}
+                if ms_arr and mv_arr and len(ms_arr) == len(mv_arr) and stat_index:
+                    for j, sidx in enumerate(ms_arr):
+                        if sidx < len(stat_index):
+                            mod_stats_dict[stat_index[sidx]] = mv_arr[j]
+
                 somv_factor = s.get("v", 1.0)
                 pdps = s.get("pd", 0.0)
                 edps = s.get("ed", 0.0)
@@ -343,7 +358,8 @@ class CalibrationEngine:
                              somv_factor=somv_factor,
                              mod_rolls=mod_rolls_dict,
                              pdps=pdps, edps=edps,
-                             sale_confidence=sale_confidence)
+                             sale_confidence=sale_confidence,
+                             mod_stats=mod_stats_dict)
                 count += 1
 
             # Load learned weights (v5+ shards)
@@ -474,7 +490,7 @@ class CalibrationEngine:
                    mod_groups: list = None, base_type: str = "",
                    mod_tiers: dict = None, somv_factor: float = 1.0,
                    mod_rolls: dict = None, pdps: float = 0.0,
-                   edps: float = 0.0):
+                   edps: float = 0.0, mod_stats: dict = None):
         """Live-add a calibration point (called after each deep query)."""
         if divine <= 0:
             return
@@ -486,7 +502,8 @@ class CalibrationEngine:
                      ts=int(time.time()), is_user=True,
                      mod_groups=mod_groups, base_type=base_type,
                      mod_tiers=mod_tiers, somv_factor=somv_factor,
-                     mod_rolls=mod_rolls, pdps=pdps, edps=edps)
+                     mod_rolls=mod_rolls, pdps=pdps, edps=edps,
+                     mod_stats=mod_stats)
 
     def _table_estimate(self, item_class: str, grade_num: int,
                         score: float, top_tier_count: int,
@@ -599,7 +616,8 @@ class CalibrationEngine:
                       base_type: str = "", mod_tiers: dict = None,
                       mod_rolls: dict = None, pdps: float = 0.0,
                       edps: float = 0.0,
-                      demand_score: float = 0.0) -> Optional[float]:
+                      demand_score: float = 0.0,
+                      mod_stats: dict = None) -> Optional[float]:
         """GBM estimate via pure-Python tree traversal. No sklearn at runtime.
 
         Returns estimated divine value, or None if no model available.
@@ -649,6 +667,11 @@ class CalibrationEngine:
         # Base type features: one-hot
         if base_type:
             features[f"base:{base_type}"] = 1.0
+
+        # Stat features: raw stat_id values (from mod_stats)
+        if mod_stats:
+            for sid, val in mod_stats.items():
+                features[f"stat:{sid}"] = val
 
         # Build feature array in training order
         feat_array = [features.get(fn, 0.0) for fn in feature_names]
@@ -715,7 +738,8 @@ class CalibrationEngine:
                  mod_tiers: dict = None,
                  mod_rolls: dict = None,
                  pdps: float = 0.0,
-                 edps: float = 0.0) -> Optional[float]:
+                 edps: float = 0.0,
+                 mod_stats: dict = None) -> Optional[float]:
         """Return estimated divine value, or None if insufficient data.
 
         Priority: GBM > class k-NN > global k-NN > grade median.
@@ -755,10 +779,14 @@ class CalibrationEngine:
                 mod_groups=mod_groups, base_type=base_type,
                 mod_tiers=mod_tiers, mod_rolls=mod_rolls,
                 pdps=pdps, edps=edps,
-                demand_score=query_demand)
+                demand_score=query_demand,
+                mod_stats=mod_stats)
             if gbm_est is not None:
                 self.last_confidence = 0.8  # GBM is most confident
                 return gbm_est
+
+        # Build mod_stats tuple for k-NN stat distance
+        ms_tuple = tuple(sorted(mod_stats.items())) if mod_stats else ()
 
         # 2. Fall back to k-NN (class-specific)
         mg_set = frozenset(mod_groups) if mod_groups else frozenset()
@@ -778,7 +806,8 @@ class CalibrationEngine:
                 somv_factor=somv_factor,
                 mod_rolls=mod_rolls,
                 pdps=pdps, edps=edps,
-                demand_score=query_demand)
+                demand_score=query_demand,
+                mod_stats_tuple=ms_tuple)
             self.last_confidence = confidence
             return result
 
@@ -797,7 +826,8 @@ class CalibrationEngine:
                 somv_factor=somv_factor,
                 mod_rolls=mod_rolls,
                 pdps=pdps, edps=edps,
-                demand_score=query_demand)
+                demand_score=query_demand,
+                mod_stats_tuple=ms_tuple)
             self.last_confidence = confidence * 0.7  # global pool is less specific
             return result
 
@@ -819,7 +849,8 @@ class CalibrationEngine:
                 mod_groups: list = None, base_type: str = "",
                 mod_tiers: dict = None, somv_factor: float = 1.0,
                 mod_rolls: dict = None, pdps: float = 0.0,
-                edps: float = 0.0, sale_confidence: float = 1.0):
+                edps: float = 0.0, sale_confidence: float = 1.0,
+                mod_stats: dict = None):
         """Insert a sample into class-specific and global lists (sorted)."""
         mg_tuple = tuple(sorted(set(mod_groups))) if mod_groups else ()
         # Compute tier aggregates
@@ -831,6 +862,9 @@ class CalibrationEngine:
         # Build mod_rolls tuple
         mr = mod_rolls or {}
         mr_tuple = tuple(sorted(mr.items())) if mr else ()
+        # Build mod_stats tuple (raw stat_id -> value pairs)
+        ms = mod_stats or {}
+        ms_tuple = tuple(sorted(ms.items())) if ms else ()
         # Compute archetype scores
         from weight_learner import compute_archetype_scores
         arch = compute_archetype_scores(list(mg_tuple))
@@ -840,7 +874,8 @@ class CalibrationEngine:
                          arch.get("coc_spell", 0.0),
                          arch.get("ci_es", 0.0),
                          arch.get("mom_mana", 0.0),
-                         somv_factor, mr_tuple, pdps, edps, sale_confidence)
+                         somv_factor, mr_tuple, pdps, edps, sale_confidence,
+                         ms_tuple)
         self._group_medians_dirty = True
         insort(self._global, entry)
         if item_class:
@@ -899,6 +934,33 @@ class CalibrationEngine:
             return 0.0
         return (1.0 - w_inter / w_union) * self.MOD_IDENTITY_WEIGHT
 
+    STAT_WEIGHT = 1.5  # primary price signal for stat-based distance
+
+    def _stat_distance(self, stats_a: tuple, stats_b: tuple) -> float:
+        """Stat-id Jaccard + value distance. Returns [0, STAT_WEIGHT].
+
+        Uses raw stat_ids from ModParser for 100% mod coverage.
+        Falls back gracefully: returns 0.0 when either side has no stats
+        (neutral for legacy data without mod_stats).
+        """
+        if not stats_a or not stats_b:
+            return 0.0  # neutral for legacy data
+        a_dict = dict(stats_a)
+        b_dict = dict(stats_b)
+        all_ids = set(a_dict) | set(b_dict)
+        shared = set(a_dict) & set(b_dict)
+        if not all_ids:
+            return 0.0
+        jaccard = 1.0 - len(shared) / len(all_ids)
+        val_dist = 0.0
+        if shared:
+            for sid in shared:
+                va, vb = abs(a_dict[sid]), abs(b_dict[sid])
+                max_v = max(va, vb, 1.0)
+                val_dist += abs(va - vb) / max_v
+            val_dist /= len(shared)
+        return (jaccard * 0.7 + val_dist * 0.3) * self.STAT_WEIGHT
+
     def _interpolate(self, score: float, samples: List[Sample],
                      grade_num: int = 1, dps_factor: float = 1.0,
                      defense_factor: float = 1.0,
@@ -915,7 +977,8 @@ class CalibrationEngine:
                      mod_rolls: dict = None,
                      pdps: float = 0.0,
                      edps: float = 0.0,
-                     demand_score: float = 0.0) -> Tuple[float, float]:
+                     demand_score: float = 0.0,
+                     mod_stats_tuple: tuple = None) -> Tuple[float, float]:
         """k-NN inverse-distance-weighted interpolation in log-price space.
 
         Distance includes mod composition (Jaccard), per-mod tier matching,
@@ -948,7 +1011,13 @@ class CalibrationEngine:
             ttc_d = abs(s[5] - top_tier_count) * self.TOP_TIER_WEIGHT
             mc_d = abs(s[6] - mod_count) * self.MOD_COUNT_WEIGHT
             s_mods = frozenset(s[9]) if s[9] else frozenset()
-            mod_d = self._weighted_jaccard_distance(mod_groups, s_mods)
+            # Use stat-based distance when both items have mod_stats (100% coverage)
+            # Fall back to weighted Jaccard for legacy data without mod_stats
+            s_stats = s[22] if len(s) > 22 else ()
+            if mod_stats_tuple and s_stats:
+                mod_d = self._stat_distance(mod_stats_tuple, s_stats)
+            else:
+                mod_d = self._weighted_jaccard_distance(mod_groups, s_mods)
             bt_d = 0.0
             if base_type and s[10] and base_type != s[10]:
                 bt_d = self.BASE_TYPE_WEIGHT

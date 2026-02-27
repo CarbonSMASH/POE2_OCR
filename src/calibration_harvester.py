@@ -348,7 +348,8 @@ def is_fake_listing(grade: str, score: float, price_div: float,
 def write_calibration_record(score_result, price_divine: float,
                              item_class: str, league: str,
                              output_file: Path, base_type: str = "",
-                             parsed_item=None, listing: dict = None):
+                             parsed_item=None, listing: dict = None,
+                             parsed_mods=None):
     """Append a calibration record to the shard output file."""
     record = {
         "ts": int(time.time()),
@@ -388,6 +389,11 @@ def write_calibration_record(score_result, price_divine: float,
         record["evasion"] = getattr(parsed_item, 'evasion', 0)
         record["energy_shield"] = getattr(parsed_item, 'energy_shield', 0)
         record["item_level"] = getattr(parsed_item, 'item_level', 0)
+
+    # Store raw stat_ids + values from ModParser (100% mod coverage)
+    if parsed_mods:
+        record["mod_stats"] = {pm.stat_id: round(pm.value, 1)
+                               for pm in parsed_mods if pm.stat_id}
 
     # Store listing ID for disappearance tracking (confirmed sales)
     if listing:
@@ -592,14 +598,17 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
                 save_state(state, pass_num)
                 continue
 
-            # For multi-pass: offset into results to get different items
+            # For multi-pass: shuffle + offset into results to get different items
+            # Shuffling with deterministic seed ensures price diversity —
+            # trade API returns cheapest first, sequential slicing biases low.
             # Offset resets per bracket set (every 5 passes) so stagger/micro
             # passes start from offset 0, not from the global pass number.
-            # Note: trade API returns ~10 IDs per search, so offset must step
-            # by FETCH_BATCH_SIZE (10), not RESULTS_PER_QUERY (50).
             pass_within_set = (pass_num - 1) % 5
             offset = pass_within_set * FETCH_BATCH_SIZE
-            available_ids = result_ids[offset:offset + FETCH_BATCH_SIZE]
+            rng = random.Random(f"{seed}:{query_key}")
+            shuffled_ids = list(result_ids)
+            rng.shuffle(shuffled_ids)
+            available_ids = shuffled_ids[offset:offset + FETCH_BATCH_SIZE]
             if not available_ids:
                 # No more results at this offset
                 print(f"  {total} total results, no new results at offset {offset}")
@@ -698,7 +707,8 @@ def run_harvester(league: str, categories: Dict[str, Tuple[str, str]],
                                          league, output_file,
                                          base_type=getattr(item, "base_type", ""),
                                          parsed_item=item,
-                                         listing=listing)
+                                         listing=listing,
+                                         parsed_mods=parsed_mods)
                 last_grade = score.grade.value
                 batch_samples += 1
                 samples_this_run += 1

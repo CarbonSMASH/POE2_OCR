@@ -136,6 +136,17 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         key=lambda bt: -base_freq[bt]
     )[:MAX_BASE_FEATURES]
 
+    # Count stat_id frequencies (from mod_stats — 100% mod coverage)
+    stat_freq: Dict[str, int] = {}
+    for rec in records:
+        for sid in rec.get("mod_stats", {}):
+            stat_freq[sid] = stat_freq.get(sid, 0) + 1
+
+    # Keep stats appearing in ≥1% of records to limit feature count
+    min_stat_freq = max(1, n // 100)
+    valid_stats = sorted(sid for sid, c in stat_freq.items()
+                         if c >= min_stat_freq)
+
     # ── Build feature names ────────────────────────────
 
     numeric_names = [
@@ -147,7 +158,8 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
     ]
     mod_feature_names = [f"mod:{g}" for g in valid_mods]
     base_feature_names = [f"base:{bt}" for bt in valid_bases]
-    feature_names = numeric_names + mod_feature_names + base_feature_names
+    stat_feature_names = [f"stat:{sid}" for sid in valid_stats]
+    feature_names = numeric_names + mod_feature_names + base_feature_names + stat_feature_names
 
     n_features = len(feature_names)
     if n_features == 0:
@@ -160,6 +172,8 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
     mod_idx = {g: len(numeric_names) + i for i, g in enumerate(valid_mods)}
     base_idx = {bt: len(numeric_names) + len(valid_mods) + i
                 for i, bt in enumerate(valid_bases)}
+    stat_idx = {sid: len(numeric_names) + len(valid_mods) + len(valid_bases) + i
+                for i, sid in enumerate(valid_stats)}
 
     X = np.zeros((n, n_features), dtype=np.float64)
     y = np.zeros(n, dtype=np.float64)
@@ -203,6 +217,11 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         bt = rec.get("base_type", "")
         if bt in base_idx:
             X[row, base_idx[bt]] = 1.0
+
+        # Stat features: raw stat_id values (from mod_stats)
+        for sid, val in rec.get("mod_stats", {}).items():
+            if sid in stat_idx:
+                X[row, stat_idx[sid]] = val
 
     # ── Train GBM ──────────────────────────────────────
 
@@ -258,6 +277,7 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         "feature_names": feature_names,
         "mod_features": valid_mods,
         "base_features": valid_bases,
+        "stat_features": valid_stats,
         "n_train": n,
         "r2_cv": round(r2_cv, 4),
     }

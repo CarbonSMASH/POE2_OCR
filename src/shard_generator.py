@@ -5,15 +5,17 @@ Pipeline: raw harvester JSONL -> quality filters -> dedup -> compact gzipped JSO
 
 Shard format (gzipped JSON):
 {
-  "version": 7,
+  "version": 8,
   "league": "Fate of the Vaal",
   "generated_at": "2026-02-18T12:00:00Z",
   "sample_count": 5432,
   "mod_index": [["IncreasedLife", 2.0], ["FireResist", 0.3], ...],
   "base_index": ["Astral Plate", "Coral Ring", ...],
+  "stat_index": ["explicit.stat_123", "explicit.stat_456", ...],
   "samples": [
     {"s": 0.584, "g": 2, "p": 4.5, "c": "Rings", "d": 1.0, "f": 1.0, "v": 1.02,
      "t": 2, "n": 5, "m": [0, 1], "mt": [1, 3], "mr": [0.85, 0.42],
+     "ms": [0, 3, 7], "mv": [42.0, 15.0, 1.0],
      "ts": 1.333, "bt": 1, "at": 2.0, "b": 3,
      "pd": 250.5, "ed": 120.3, "ar": 500, "ev": 0, "es": 200, "il": 82}
   ]
@@ -22,6 +24,7 @@ Shard format (gzipped JSON):
 Fields: s=score, g=grade_num, p=divine_price, c=item_class, d=dps_factor, f=defense_factor,
         v=somv_factor, t=top_tier_count, n=mod_count, m=mod_group_indices (into mod_index),
         mt=mod_tier_numbers (parallel to m), mr=mod_roll_quality (parallel to m, 0-1 or -1 unknown),
+        ms=stat_indices (into stat_index), mv=stat_values (parallel to ms),
         ts=tier_score (sum(1/tier)), bt=best_tier (min tier), at=avg_tier,
         b=base_type_index (into base_index),
         pd=physical_dps, ed=elemental_dps, ar=armour, ev=evasion, es=energy_shield, il=item_level
@@ -329,7 +332,8 @@ def _compute_tier_aggregates(rec: dict) -> Tuple[float, int, float]:
     return (round(sum(1.0 / t for t in tiers), 3), min(tiers), round(sum(tiers) / len(tiers), 2))
 
 
-def compact_record(rec: dict, mod_to_idx: dict = None, base_to_idx: dict = None) -> dict:
+def compact_record(rec: dict, mod_to_idx: dict = None, base_to_idx: dict = None,
+                   stat_to_idx: dict = None) -> dict:
     """Convert a full record to compact shard format."""
     compact = {
         "s": round(rec["score"], 3),
@@ -404,6 +408,16 @@ def compact_record(rec: dict, mod_to_idx: dict = None, base_to_idx: dict = None)
         bt = rec.get("base_type", "")
         if bt and bt in base_to_idx:
             compact["b"] = base_to_idx[bt]
+
+    # Stat features: raw stat_id indices + values (v8+)
+    if stat_to_idx:
+        rec_stats = rec.get("mod_stats", {})
+        if rec_stats:
+            sorted_sids = sorted(sid for sid in rec_stats if sid in stat_to_idx)
+            if sorted_sids:
+                compact["ms"] = [stat_to_idx[sid] for sid in sorted_sids]
+                compact["mv"] = [round(rec_stats[sid], 1) for sid in sorted_sids]
+
     return compact
 
 
@@ -551,6 +565,7 @@ def _prepare_gbm_records(deduped: List[dict], mod_to_idx: dict,
             "base_type": rec.get("base_type", ""),
             "mod_tiers": mod_tiers,
             "mod_rolls": rec.get("mod_rolls", {}),
+            "mod_stats": rec.get("mod_stats", {}),
             "pdps": rec.get("pdps", 0.0),
             "edps": rec.get("edps", 0.0),
             "sale_confidence": rec.get("sale_confidence", 1.0),
@@ -625,8 +640,18 @@ def generate_shard(records: List[dict], league: str, output_path: str):
     sorted_bases = sorted(all_base_types)
     base_to_idx = {bt: i for i, bt in enumerate(sorted_bases)}
 
+    # Build stat_id index from mod_stats fields (v8+)
+    all_stats = set()
+    for rec in deduped:
+        for sid in rec.get("mod_stats", {}):
+            all_stats.add(sid)
+    stat_list = sorted(all_stats)
+    stat_to_idx = {s: i for i, s in enumerate(stat_list)}
+    if stat_list:
+        print(f"  Stat index: {len(stat_list)} unique stat_ids")
+
     # Compact format
-    samples = [compact_record(r, mod_to_idx, base_to_idx) for r in deduped]
+    samples = [compact_record(r, mod_to_idx, base_to_idx, stat_to_idx) for r in deduped]
 
     # Train learned weights from the deduped records
     learned_weights_dict = None
@@ -684,7 +709,7 @@ def generate_shard(records: List[dict], league: str, output_path: str):
         league = leagues.pop() if len(leagues) == 1 else "unknown"
 
     shard = {
-        "version": 7,
+        "version": 8,
         "league": league,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sample_count": len(samples),
@@ -694,6 +719,8 @@ def generate_shard(records: List[dict], league: str, output_path: str):
         shard["mod_index"] = mod_index
     if sorted_bases:
         shard["base_index"] = sorted_bases
+    if stat_list:
+        shard["stat_index"] = stat_list
     if learned_weights_dict:
         shard["learned_weights"] = learned_weights_dict
     if price_tables:
@@ -715,6 +742,12 @@ def generate_shard(records: List[dict], league: str, output_path: str):
     with_mt = sum(1 for s in samples if s.get("mt"))
     print(f"\n  Tier data: {with_tiers}/{len(samples)} samples have tier aggregates "
           f"({with_mt} with per-mod tiers)")
+
+    # Stat data coverage
+    with_stats = sum(1 for s in samples if s.get("ms"))
+    if stat_list:
+        print(f"  Stat data: {with_stats}/{len(samples)} samples have mod_stats "
+              f"({len(stat_list)} unique stat_ids)")
 
     # Class breakdown
     by_class: Dict[str, int] = {}
@@ -790,6 +823,9 @@ def validate_shard(shard_path: str, seed: int = 42):
     # Load base type index (v4+ shards)
     base_index = shard.get("base_index", [])
 
+    # Load stat index (v8+ shards)
+    stat_index = shard.get("stat_index", [])
+
     def _sample_mod_groups(s):
         return [idx_to_group[idx] for idx in s.get("m", []) if idx in idx_to_group]
 
@@ -815,12 +851,22 @@ def validate_shard(shard_path: str, seed: int = 42):
         return {idx_to_group[m[i]]: mr[i]
                 for i in range(len(m)) if m[i] in idx_to_group and mr[i] >= 0}
 
+    def _sample_mod_stats(s):
+        """Reconstruct {stat_id: value} dict from 'ms' + 'mv' arrays."""
+        ms = s.get("ms", [])
+        mv = s.get("mv", [])
+        if not ms or not mv or len(ms) != len(mv) or not stat_index:
+            return {}
+        return {stat_index[ms[i]]: mv[i]
+                for i in range(len(ms)) if ms[i] < len(stat_index)}
+
     # Build training records for both k-NN and price tables
     train_records = []
     for i in train_idx:
         s = samples[i]
         mod_tiers = _sample_mod_tiers(s)
         mod_rolls = _sample_mod_rolls(s)
+        mod_stats = _sample_mod_stats(s)
         engine._insert(
             score=s["s"],
             divine=s["p"],
@@ -838,6 +884,7 @@ def validate_shard(shard_path: str, seed: int = 42):
             pdps=s.get("pd", 0.0),
             edps=s.get("ed", 0.0),
             sale_confidence=s.get("sc", 1.0),
+            mod_stats=mod_stats,
         )
         train_records.append({
             "item_class": s.get("c", ""),
@@ -896,6 +943,7 @@ def validate_shard(shard_path: str, seed: int = 42):
                 "base_type": _sample_base_type(s),
                 "mod_tiers": tr.get("mod_tiers", {}),
                 "mod_rolls": tr.get("mod_rolls", {}),
+                "mod_stats": _sample_mod_stats(s),
                 "pdps": tr.get("pdps", 0.0),
                 "edps": tr.get("edps", 0.0),
             })
@@ -933,7 +981,8 @@ def validate_shard(shard_path: str, seed: int = 42):
                               mod_tiers=_sample_mod_tiers(s),
                               mod_rolls=_sample_mod_rolls(s),
                               pdps=s.get("pd", 0.0),
-                              edps=s.get("ed", 0.0))
+                              edps=s.get("ed", 0.0),
+                              mod_stats=_sample_mod_stats(s))
         if est is None:
             continue
 
@@ -1105,7 +1154,8 @@ def validate_shard(shard_path: str, seed: int = 42):
                 mod_tiers=mod_tiers,
                 mod_rolls=_sample_mod_rolls(s),
                 pdps=s.get("pd", 0.0),
-                edps=s.get("ed", 0.0))
+                edps=s.get("ed", 0.0),
+                mod_stats=_sample_mod_stats(s))
             if est is None:
                 continue
 
