@@ -2636,6 +2636,17 @@
         if (ago < 1440) return `${Math.floor(ago / 60)}h ago`;
         return `${Math.floor(ago / 1440)}d ago`;
       })() : "never";
+      const companionApi = async (path, method = "GET", body) => {
+        const opts = { method, headers: { "Content-Type": "application/json" } };
+        if (body) opts.body = JSON.stringify(body);
+        const res = await fetch(path, opts);
+        return res.json();
+      };
+      const [companionState, setCompanionState] = useState({ enabled: false, host: "", port: 8450, pin: "" });
+      const [companionLoading, setCompanionLoading] = useState(false);
+      useEffect(() => {
+        companionApi("/api/companion/info").then(data => setCompanionState(prev => ({ ...prev, ...data }))).catch(() => {});
+      }, []);
       return (
         <div style={{ marginTop: 8, marginBottom: 8 }}>
           {/* Toggles row */}
@@ -2820,6 +2831,55 @@
           </div>
           {/* Overlay Preview */}
           <OverlayPreview settings={settings} onUpdate={onUpdate} />
+          {/* Companion Mode (mobile app pairing) */}
+          <div className="panel" style={{ ...CARD, padding: 12, marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ ...LABEL, marginBottom: 0 }}>Companion Mode</div>
+              <Toggle value={companionState.enabled} onChange={async (v) => {
+                setCompanionLoading(true);
+                try {
+                  if (v) {
+                    const data = await companionApi("/api/companion/enable", "POST");
+                    setCompanionState({ enabled: true, host: data.host, port: data.port, pin: data.pin });
+                  } else {
+                    await companionApi("/api/companion/disable", "POST");
+                    setCompanionState({ enabled: false, host: "", port: 8450, pin: "" });
+                  }
+                } catch (e) { console.error(e); }
+                setCompanionLoading(false);
+              }} size="small" />
+            </div>
+            <div style={{ fontSize: 10, color: T.textSecond, marginBottom: companionState.enabled ? 10 : 0 }}>
+              Pair with LAMA Mobile for remote overlay control. Requires app restart to change network binding.
+            </div>
+            {companionState.enabled && (
+              <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                <div style={{ textAlign: "center" }}>
+                  <img src="/api/companion/qr" alt="QR Code" style={{ width: 120, height: 120, borderRadius: 6, background: "#fff", padding: 4 }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10, color: T.textSecond, marginBottom: 4 }}>PIN</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 28, fontWeight: 700, color: T.gold, letterSpacing: 6, marginBottom: 8 }}>{companionState.pin}</div>
+                  <div style={{ fontSize: 10, color: T.textSecond, marginBottom: 2 }}>LAN Address</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: T.text, marginBottom: 10 }}>{companionState.host}:{companionState.port}</div>
+                  <button onClick={async () => {
+                    setCompanionLoading(true);
+                    try {
+                      await companionApi("/api/companion/disable", "POST");
+                      const data = await companionApi("/api/companion/enable", "POST");
+                      setCompanionState({ enabled: true, host: data.host, port: data.port, pin: data.pin });
+                    } catch (e) { console.error(e); }
+                    setCompanionLoading(false);
+                  }} style={{ ...BTN, background: T.input, border: `1px solid ${T.border}`, color: T.textSecond, padding: "4px 10px", fontSize: 10 }}>
+                    Regenerate PIN
+                  </button>
+                  <div style={{ fontSize: 9, color: T.amber, marginTop: 8 }}>
+                    Windows Firewall may need to allow port {companionState.port} for LAN access.
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       );
     }

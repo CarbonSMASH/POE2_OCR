@@ -136,6 +136,8 @@ DEFAULT_SETTINGS = {
     "window_width": 1100,
     "window_height": 750,
     "window_maximized": False,
+    "companion_enabled": False,
+    "companion_pin": "",
 }
 
 
@@ -204,6 +206,33 @@ def deep_merge(base: dict, updates: dict) -> dict:
         else:
             base[key] = value
     return base
+
+
+# ---------------------------------------------------------------------------
+# Companion mode utilities
+# ---------------------------------------------------------------------------
+import random
+import socket
+import io
+
+COMPANION_CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O/1/I/L
+
+
+def generate_pin(length: int = 4) -> str:
+    """Generate a random PIN from the safe charset."""
+    return "".join(random.choice(COMPANION_CHARSET) for _ in range(length))
+
+
+def get_lan_ip() -> str:
+    """Get the LAN IP address via UDP trick (no actual packet sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 def load_settings() -> dict:
@@ -819,6 +848,7 @@ def _redact_settings(settings: dict) -> dict:
         out["poesessid"] = ""
     else:
         out["poesessid_set"] = False
+    out.pop("companion_pin", None)
     return out
 
 
@@ -2617,14 +2647,107 @@ async def serve_image(filename: str):
 
 
 # ---------------------------------------------------------------------------
+# Companion mode endpoints (mobile app pairing)
+# ---------------------------------------------------------------------------
+@app.post("/api/companion/enable")
+async def companion_enable():
+    """Enable companion mode — generate PIN and return connection info."""
+    settings = load_settings()
+    pin = generate_pin()
+    settings["companion_enabled"] = True
+    settings["companion_pin"] = pin
+    save_settings(settings)
+    host = get_lan_ip()
+    await ws_manager.broadcast({"type": "settings", "settings": _redact_settings(settings)})
+    await ws_manager.broadcast({
+        "type": "companion_status",
+        "enabled": True,
+        "host": host,
+        "port": PORT,
+        "pin": pin,
+    })
+    return {"host": host, "port": PORT, "pin": pin}
+
+
+@app.post("/api/companion/disable")
+async def companion_disable():
+    """Disable companion mode — clear PIN."""
+    settings = load_settings()
+    settings["companion_enabled"] = False
+    settings["companion_pin"] = ""
+    save_settings(settings)
+    await ws_manager.broadcast({"type": "settings", "settings": _redact_settings(settings)})
+    await ws_manager.broadcast({"type": "companion_status", "enabled": False})
+    return {"status": "disabled"}
+
+
+@app.get("/api/companion/qr")
+async def companion_qr():
+    """Return QR code PNG for mobile pairing."""
+    settings = load_settings()
+    if not settings.get("companion_enabled") or not settings.get("companion_pin"):
+        return JSONResponse({"error": "Companion mode not enabled"}, status_code=400)
+    try:
+        import qrcode
+    except ImportError:
+        return JSONResponse({"error": "qrcode library not installed"}, status_code=500)
+    host = get_lan_ip()
+    pin = settings["companion_pin"]
+    payload = json.dumps({"host": host, "port": PORT, "pin": pin})
+    img = qrcode.make(payload)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(buf, media_type="image/png")
+
+
+@app.post("/api/companion/verify")
+async def companion_verify(req: Request):
+    """Verify a companion PIN — called by mobile app before connecting."""
+    settings = load_settings()
+    if not settings.get("companion_enabled"):
+        return JSONResponse({"verified": False, "error": "Companion mode not enabled"}, status_code=403)
+    pin = req.headers.get("X-LAMA-PIN", "")
+    expected = settings.get("companion_pin", "")
+    if not expected or pin != expected:
+        return JSONResponse({"verified": False, "error": "Invalid PIN"}, status_code=401)
+    from config import APP_VERSION
+    return {"verified": True, "version": APP_VERSION}
+
+
+@app.get("/api/companion/info")
+async def companion_info():
+    """Return companion mode status (no PIN unless enabled)."""
+    settings = load_settings()
+    enabled = settings.get("companion_enabled", False)
+    result = {"enabled": enabled}
+    if enabled:
+        result["host"] = get_lan_ip()
+        result["port"] = PORT
+    return result
+
+
+# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # Validate companion PIN if companion mode is enabled
+    settings_raw = load_settings()
+    if settings_raw.get("companion_enabled") and settings_raw.get("companion_pin"):
+        pin = ws.query_params.get("pin", "")
+        # Allow local connections without PIN (dashboard)
+        client_host = ws.client.host if ws.client else ""
+        is_local = client_host in ("127.0.0.1", "::1", "localhost")
+        if not is_local and pin != settings_raw["companion_pin"]:
+            await ws.close(code=4001, reason="Invalid PIN")
+            return
+
     await ws_manager.connect(ws)
     try:
         # Send initial state
-        settings = _redact_settings(load_settings())
+        settings = _redact_settings(settings_raw)
         init_msg = {
             "type": "init",
             **overlay.get_status(),
@@ -2665,10 +2788,11 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
 
-    logger.info(f"Starting LAMA dashboard server on port {PORT}")
+    _host = "0.0.0.0" if load_settings().get("companion_enabled") else "127.0.0.1"
+    logger.info(f"Binding to {_host}:{PORT}")
     uvicorn.run(
         "server:app",
-        host="127.0.0.1",
+        host=_host,
         port=PORT,
         log_level="info",
     )

@@ -40,12 +40,27 @@ WINDOW_WIDTH = 1100
 WINDOW_HEIGHT = 750
 
 
+def _companion_enabled() -> bool:
+    """Check if companion mode is enabled in settings."""
+    settings_path = os.path.join(
+        os.path.expanduser("~"), ".poe2-price-overlay", "dashboard_settings.json"
+    )
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path) as f:
+                return json.load(f).get("companion_enabled", False)
+    except Exception:
+        pass
+    return False
+
+
 def start_server():
     """Run the FastAPI server in a background thread."""
     import uvicorn
+    host = "0.0.0.0" if _companion_enabled() else "127.0.0.1"
     uvicorn.run(
         "server:app",
-        host="127.0.0.1",
+        host=host,
         port=PORT,
         log_level="info",
     )
