@@ -113,6 +113,7 @@ class ParsedGuide:
     char_class: str = ""
     ascendancy: str = ""
     main_skill: str = ""
+    author: str = ""
     stages: List[GuideStageData] = field(default_factory=list)
     imported_at: str = ""
     raw_html_hash: str = ""
@@ -190,6 +191,7 @@ def _dict_to_guide(d: dict) -> ParsedGuide:
         char_class=d.get("char_class", ""),
         ascendancy=d.get("ascendancy", ""),
         main_skill=d.get("main_skill", ""),
+        author=d.get("author", ""),
         stages=stages,
         imported_at=d.get("imported_at", ""),
         raw_html_hash=d.get("raw_html_hash", ""),
@@ -310,11 +312,68 @@ def _normalize_slot(raw: str) -> str:
 def _clean_text(el) -> str:
     if el is None:
         return ""
-    return re.sub(r"\s+", " ", el.get_text(strip=True))
+    return re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip()
+
+
+def _rich_text(el) -> str:
+    """Extract text preserving game references as [bracketed] annotations."""
+    if el is None:
+        return ""
+    parts = []
+    for child in el.children:
+        if isinstance(child, str):
+            parts.append(child)
+        elif child.name in ("a", "abbr") or (
+            child.name == "span" and child.get("class")
+        ):
+            # Inline element with styling/link — likely a game reference
+            text = child.get_text(" ", strip=True)
+            if text:
+                parts.append(f"[{text}]")
+        else:
+            # Structural element or unstyled inline — recurse
+            parts.append(_rich_text(child))
+    raw = " ".join(parts)
+    return re.sub(r"\s+", " ", raw).strip()
 
 
 def _hash_html(html: str) -> str:
     return hashlib.sha256(html.encode("utf-8")).hexdigest()[:16]
+
+
+def _extract_author(soup: BeautifulSoup) -> str:
+    """Best-effort author extraction from guide HTML."""
+    # Maxroll: link to /@username
+    for a in soup.find_all("a", href=re.compile(r"^/?@")):
+        name = a.get_text(" ", strip=True)
+        if name and len(name) < 60:
+            return name
+    # Mobalytics / generic: profile link with display name
+    for a in soup.find_all("a", href=re.compile(r"/profile/\w+")):
+        name = a.get_text(" ", strip=True)
+        if name and len(name) < 40 and name.lower() not in ("profile",):
+            return name
+    # "By AuthorName" byline pattern
+    for el in soup.find_all(["span", "div"]):
+        m = re.match(r"^By\s+(\w[\w\s]{1,30})$", el.get_text(" ", strip=True))
+        if m:
+            return m.group(1).strip()
+    # Meta tag
+    meta = soup.find("meta", attrs={"name": "author"})
+    if meta and meta.get("content"):
+        return meta["content"].strip()
+    # JSON-LD
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            ld = json.loads(script.string or "")
+            author = ld.get("author")
+            if isinstance(author, dict):
+                author = author.get("name", "")
+            if isinstance(author, str) and author:
+                return author.strip()
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return ""
 
 
 def _detect_class_ascendancy(text: str) -> Tuple[str, str]:
@@ -517,6 +576,9 @@ class MaxrollParser:
         title_el = soup.find("h1")
         guide.title = _clean_text(title_el) if title_el else "Maxroll Guide"
 
+        # Author credit
+        guide.author = _extract_author(soup)
+
         # Class/Ascendancy from HTML text
         page_text = soup.get_text(" ", strip=True)
         guide.char_class, guide.ascendancy = _detect_class_ascendancy(page_text)
@@ -700,7 +762,7 @@ class MaxrollParser:
             tab_divs = container.find_all(class_=re.compile(r'^_tab_'), recursive=False)
             # Get the visible (first) tab's text as general notes
             for td in tab_divs:
-                text = td.get_text(" ", strip=True)[:500]
+                text = _rich_text(td)[:2000]
                 if text and guide.stages:
                     # Add to the first stage's notes
                     guide.stages[0].notes = text
@@ -729,6 +791,8 @@ class GenericHTMLParser:
         title_el = soup.find("h1") or soup.find("title")
         guide.title = _clean_text(title_el) if title_el else "Build Guide"
 
+        guide.author = _extract_author(soup)
+
         page_text = soup.get_text(" ", strip=True)
         guide.char_class, guide.ascendancy = _detect_class_ascendancy(page_text)
         guide.main_skill = MaxrollParser._detect_main_skill(guide.title, page_text)
@@ -739,13 +803,19 @@ class GenericHTMLParser:
         skills = cls._extract_skills_from_html(body)
 
         if gear or skills:
+            notes = cls._extract_notes_from_sections(body)
             guide.stages = [GuideStageData(
                 stage=GuideStage.ENDGAME.value,
                 level_range=(1, 100),
                 gear=gear,
                 skills=skills,
-                notes="Parsed from page content (single-stage extraction).",
+                notes=notes,
             )]
+        else:
+            # Fallback: section-based extraction (Mobalytics rich-text layouts)
+            stage = cls._extract_from_sections(body)
+            if stage:
+                guide.stages = [stage]
 
         return guide
 
@@ -758,9 +828,9 @@ class GenericHTMLParser:
                 cells = row.find_all(["td", "th"])
                 if len(cells) >= 2:
                     slot = _normalize_slot(_clean_text(cells[0]))
-                    name = _clean_text(cells[1])
+                    name = _rich_text(cells[1])
                     if slot and name and slot not in seen:
-                        mods = [_clean_text(cells[2])] if len(cells) > 2 else []
+                        mods = [_rich_text(cells[2])] if len(cells) > 2 else []
                         gear.append(GuideGearItem(slot=slot, name=name, key_mods=mods))
                         seen.add(slot)
         if not gear:
@@ -771,7 +841,7 @@ class GenericHTMLParser:
                     slot = _normalize_slot(m.group(1))
                     if slot in ("weapon", "helmet", "body", "gloves", "boots", "belt",
                                 "ring", "ring2", "amulet", "shield") and slot not in seen:
-                        gear.append(GuideGearItem(slot=slot, name=m.group(2).strip()))
+                        gear.append(GuideGearItem(slot=slot, name=_rich_text(li)))
                         seen.add(slot)
         return gear
 
@@ -783,13 +853,126 @@ class GenericHTMLParser:
             if any(kw in _clean_text(header).lower() for kw in ("skill", "gem", "setup")):
                 next_list = header.find_next(["ul", "ol"])
                 if next_list:
-                    items = [_clean_text(li) for li in next_list.find_all("li") if _clean_text(li)]
+                    items = [_rich_text(li) for li in next_list.find_all("li") if _clean_text(li)]
                     if items and items[0] not in seen:
                         skills.append(GuideSkillSetup(
                             name=items[0], supports=items[1:], is_main=not skills,
                         ))
                         seen.add(items[0])
         return skills
+
+    @classmethod
+    def _extract_notes_from_sections(cls, root: Tag) -> str:
+        """Extract prose notes from Equipment/Gear/Skill sections for GUIDE NOTES."""
+        notes_parts: List[str] = []
+        for section in root.find_all("section"):
+            h2 = section.find("h2")
+            if not h2:
+                continue
+            title = _clean_text(h2).lower()
+            if not any(kw in title for kw in ("equipment", "gear", "skill", "gem")):
+                continue
+            blocks = cls._extract_section_blocks(section)
+            if not blocks:
+                continue
+            lines: List[str] = []
+            for block in blocks:
+                if block.name in ("h3", "h4", "h5"):
+                    text = _clean_text(block)
+                    if text:
+                        lines.append(f"\n{text}")
+                elif block.name == "ul":
+                    for li in block.find_all("li"):
+                        text = _rich_text(li)
+                        if text:
+                            lines.append(text)
+                elif block.name in ("p", "li"):
+                    text = _rich_text(block)
+                    if text:
+                        lines.append(text)
+            if lines:
+                notes_parts.append("\n".join(lines).strip())
+        return "\n\n".join(notes_parts)
+
+    @classmethod
+    def _extract_section_blocks(cls, section: Tag) -> List[Tag]:
+        """Return the block-level children (p, h3, h4, li) from a section's lexical container."""
+        container = None
+        for div in section.find_all("div"):
+            cls_list = div.get("class", [])
+            if any("lexical" in c for c in cls_list):
+                container = div
+                break
+        if not container:
+            return []
+        inner = container
+        while True:
+            block_children = [c for c in inner.children
+                              if hasattr(c, "name") and c.name in ("p", "h3", "h4", "h5", "li", "div")]
+            if len(block_children) <= 1:
+                child_div = inner.find("div", recursive=False)
+                if child_div:
+                    inner = child_div
+                    continue
+            break
+        return [c for c in inner.children if hasattr(c, "name") and c.name]
+
+    @classmethod
+    def _extract_from_sections(cls, root: Tag) -> Optional[GuideStageData]:
+        """Fallback: extract from <section> elements with game-reference widgets."""
+        skills: List[GuideSkillSetup] = []
+        notes_parts: List[str] = []
+
+        for section in root.find_all("section"):
+            h2 = section.find("h2")
+            if not h2:
+                continue
+            title = _clean_text(h2).lower()
+            widgets = section.find_all(attrs={"data-testid": "static-data-widget"})
+            if not widgets:
+                continue
+
+            if "skill" in title or "gem" in title:
+                # Extract paragraphs as skill cards, grouping by leading game reference
+                # Paragraphs starting with [BracketedRef] become new skill entries;
+                # those without become supports of the previous skill.
+                blocks = cls._extract_section_blocks(section)
+                for block in blocks:
+                    if block.name in ("p", "li"):
+                        text = _rich_text(block)
+                        if text and len(text) > 10:
+                            if text.startswith("[") or not skills:
+                                skills.append(GuideSkillSetup(
+                                    name=text, is_main=not skills,
+                                ))
+                            else:
+                                skills[-1].supports.append(text)
+
+            elif "equipment" in title or "gear" in title:
+                # Equipment prose → structured notes with paragraph breaks
+                blocks = cls._extract_section_blocks(section)
+                lines: List[str] = []
+                for block in blocks:
+                    if block.name in ("h3", "h4", "h5"):
+                        text = _clean_text(block)
+                        if text:
+                            lines.append(f"\n{text}")
+                    elif block.name in ("p", "li"):
+                        text = _rich_text(block)
+                        if text:
+                            lines.append(text)
+                if lines:
+                    notes_parts.append("\n".join(lines).strip())
+
+        if not skills and not notes_parts:
+            return None
+
+        return GuideStageData(
+            stage=GuideStage.ENDGAME.value,
+            level_range=(1, 100),
+            skills=skills,
+            notes="\n\n".join(notes_parts),
+        )
 
 
 # ---------------------------------------------------------------------------

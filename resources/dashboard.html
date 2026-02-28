@@ -8080,6 +8080,21 @@
       "off path": { color: T.red, bg: "rgba(168,50,50,0.15)", border: "rgba(168,50,50,0.3)" },
     };
 
+    function renderAnnotatedText(text) {
+      if (!text) return null;
+      const parts = text.split(/(\[[^\]]+\])/g);
+      return parts.map((part, i) => {
+        if (part.startsWith('[') && part.endsWith(']')) {
+          const inner = part.slice(1, -1);
+          return React.createElement('span', {
+            key: i,
+            style: { color: T.gold, fontWeight: 600 },
+          }, inner);
+        }
+        return part;
+      });
+    }
+
     function GuideTab({ charData }) {
       const [guides, setGuides] = useState([]);
       const [selectedGuide, setSelectedGuide] = useState(null);
@@ -8244,6 +8259,11 @@
                     {[guideData.ascendancy, guideData.char_class, guideData.main_skill].filter(Boolean).join(" \u2022 ")}
                     {guideData.source !== "unknown" && <span style={{ marginLeft: 8, fontSize: 10, color: T.textMuted }}>via {guideData.source}</span>}
                   </div>
+                  {guideData.author && (
+                    <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                      Guide by <span style={{ color: T.gold, fontWeight: 600 }}>{guideData.author}</span>
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   {charData ? (
@@ -8360,11 +8380,11 @@
                                 )}
                               </div>
                               <div style={{ fontSize: 12, fontWeight: 600, color: item.is_unique ? "#af6025" : T.text, marginBottom: 2 }}>
-                                {item.name}
+                                {renderAnnotatedText(item.name)}
                               </div>
                               {item.key_mods && item.key_mods.length > 0 && (
                                 <div style={{ fontSize: 10, color: T.textSecond, marginTop: 2 }}>
-                                  {item.key_mods.join(" \u2022 ")}
+                                  {renderAnnotatedText(item.key_mods.join(" \u2022 "))}
                                 </div>
                               )}
                               {cmp && cmp.current_item && cmp.status !== "match" && (
@@ -8402,7 +8422,7 @@
                             }}>
                               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                                 <span style={{ fontSize: 12, fontWeight: 600, color: skill.is_main ? T.gold : T.text }}>
-                                  {skill.name}
+                                  {renderAnnotatedText(skill.name)}
                                   {skill.is_main && <span style={{ fontSize: 9, marginLeft: 5, color: T.gold, fontWeight: 700 }}>MAIN</span>}
                                 </span>
                                 {cmp && (
@@ -8422,14 +8442,14 @@
                                         border: `1px solid ${isMissing ? "rgba(168,50,50,0.3)" : "rgba(255,255,255,0.08)"}`,
                                         color: isMissing ? T.red : T.textSecond,
                                       }}>
-                                        {sup}
+                                        {renderAnnotatedText(sup)}
                                       </span>
                                     );
                                   })}
                                 </div>
                               )}
                               {skill.notes && (
-                                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>{skill.notes}</div>
+                                <div style={{ fontSize: 10, color: T.textMuted, marginTop: 4, fontStyle: "italic" }}>{renderAnnotatedText(skill.notes)}</div>
                               )}
                             </div>
                           );
@@ -8474,7 +8494,7 @@
                         </div>
                       )}
                       {currentStageData.passives.notes && (
-                        <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6, fontStyle: "italic" }}>{currentStageData.passives.notes}</div>
+                        <div style={{ fontSize: 10, color: T.textMuted, marginTop: 6, fontStyle: "italic" }}>{renderAnnotatedText(currentStageData.passives.notes)}</div>
                       )}
                     </div>
                   )}
@@ -8504,8 +8524,8 @@
                   {(currentStageData.notes || comparison?.stage_notes) && (
                     <div style={CARD}>
                       <div style={{ ...LABEL, marginBottom: 6 }}>GUIDE NOTES</div>
-                      <div style={{ fontSize: 11, color: T.textSecond, lineHeight: 1.6 }}>
-                        {currentStageData.notes || comparison?.stage_notes}
+                      <div style={{ fontSize: 11, color: T.textSecond, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                        {renderAnnotatedText(currentStageData.notes || comparison?.stage_notes)}
                       </div>
                     </div>
                   )}
