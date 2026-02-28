@@ -893,7 +893,11 @@ class LAMA:
             mod_rolls=mod_rolls,
             somv_factor=getattr(score, "somv_factor", 1.0),
             pdps=getattr(item, "physical_dps", 0.0),
-            edps=getattr(item, "elemental_dps", 0.0))
+            edps=getattr(item, "elemental_dps", 0.0),
+            item_level=getattr(item, "item_level", 0) or 0,
+            armour=getattr(item, "armour", 0) or 0,
+            evasion=getattr(item, "evasion", 0) or 0,
+            energy_shield=getattr(item, "energy_shield", 0) or 0)
 
         # Check trade cache — deep query or auto-cal may have a real price
         cached_trade = None

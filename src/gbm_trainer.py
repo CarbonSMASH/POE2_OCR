@@ -45,6 +45,7 @@ def train_gbm_models(records: List[dict],
         item_class, grade_num, score, top_tier_count, mod_count,
         dps_factor, defense_factor, somv_factor, tier_score, best_tier,
         avg_tier, coc_score, es_score, mana_score,
+        item_level, armour, evasion, energy_shield, total_dps, total_defense,
         mod_groups (list of str), base_type (str), mod_tiers (dict)
     """
     try:
@@ -155,6 +156,8 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         "tier_score", "best_tier", "avg_tier",
         "arch_coc_spell", "arch_ci_es", "arch_mom_mana",
         "pdps", "edps", "demand_score",
+        "item_level", "armour", "evasion", "energy_shield",
+        "total_dps", "total_defense",
     ]
     mod_feature_names = [f"mod:{g}" for g in valid_mods]
     base_feature_names = [f"base:{bt}" for bt in valid_bases]
@@ -198,6 +201,12 @@ def _train_class_gbm(item_class: str, records: List[dict], np,
         X[row, 13] = rec.get("pdps", 0.0)
         X[row, 14] = rec.get("edps", 0.0)
         X[row, 15] = rec.get("demand_score", 0.0)
+        X[row, 16] = rec.get("item_level", 0)
+        X[row, 17] = rec.get("armour", 0)
+        X[row, 18] = rec.get("evasion", 0)
+        X[row, 19] = rec.get("energy_shield", 0)
+        X[row, 20] = rec.get("total_dps", 0.0)
+        X[row, 21] = rec.get("total_defense", 0)
 
         # Mod features: roll-quality-weighted tier encoding
         mod_tiers = rec.get("mod_tiers", {})

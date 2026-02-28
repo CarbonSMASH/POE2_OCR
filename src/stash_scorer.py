@@ -155,6 +155,10 @@ class StashScorer:
                         somv_factor=getattr(score, "somv_factor", 1.0),
                         pdps=getattr(parsed_item, "physical_dps", 0.0),
                         edps=getattr(parsed_item, "elemental_dps", 0.0),
+                        item_level=getattr(parsed_item, "item_level", 0) or 0,
+                        armour=getattr(parsed_item, "armour", 0) or 0,
+                        evasion=getattr(parsed_item, "evasion", 0) or 0,
+                        energy_shield=getattr(parsed_item, "energy_shield", 0) or 0,
                     )
                     if est is not None:
                         estimate_divine = round(est, 2)

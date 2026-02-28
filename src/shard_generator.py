@@ -569,6 +569,15 @@ def _prepare_gbm_records(deduped: List[dict], mod_to_idx: dict,
             "pdps": rec.get("pdps", 0.0),
             "edps": rec.get("edps", 0.0),
             "sale_confidence": rec.get("sale_confidence", 1.0),
+            "item_level": rec.get("item_level", 0),
+            "armour": rec.get("armour", 0),
+            "evasion": rec.get("evasion", 0),
+            "energy_shield": rec.get("energy_shield", 0),
+            "total_dps": rec.get("total_dps", 0.0) or (
+                rec.get("pdps", 0.0) + rec.get("edps", 0.0)),
+            "total_defense": rec.get("total_defense", 0) or (
+                rec.get("armour", 0) + rec.get("evasion", 0)
+                + rec.get("energy_shield", 0)),
         })
 
     return gbm_records
@@ -923,6 +932,11 @@ def validate_shard(shard_path: str, seed: int = 42):
             s = samples[i]
             mg = tr.get("mod_groups", [])
             arch = _arch_scores(mg) if mg else {}
+            _pdps = tr.get("pdps", 0.0)
+            _edps = tr.get("edps", 0.0)
+            _ar = s.get("ar", 0)
+            _ev = s.get("ev", 0)
+            _es = s.get("es", 0)
             gbm_train_records.append({
                 "item_class": tr["item_class"],
                 "grade_num": _GRADE_NUM.get(tr.get("grade", "C"), 1),
@@ -944,8 +958,14 @@ def validate_shard(shard_path: str, seed: int = 42):
                 "mod_tiers": tr.get("mod_tiers", {}),
                 "mod_rolls": tr.get("mod_rolls", {}),
                 "mod_stats": _sample_mod_stats(s),
-                "pdps": tr.get("pdps", 0.0),
-                "edps": tr.get("edps", 0.0),
+                "pdps": _pdps,
+                "edps": _edps,
+                "item_level": s.get("il", 0),
+                "armour": _ar,
+                "evasion": _ev,
+                "energy_shield": _es,
+                "total_dps": _pdps + _edps,
+                "total_defense": _ar + _ev + _es,
             })
         gbm_models = train_gbm_models(gbm_train_records)
         if gbm_models:
@@ -982,7 +1002,11 @@ def validate_shard(shard_path: str, seed: int = 42):
                               mod_rolls=_sample_mod_rolls(s),
                               pdps=s.get("pd", 0.0),
                               edps=s.get("ed", 0.0),
-                              mod_stats=_sample_mod_stats(s))
+                              mod_stats=_sample_mod_stats(s),
+                              item_level=s.get("il", 0),
+                              armour=s.get("ar", 0),
+                              evasion=s.get("ev", 0),
+                              energy_shield=s.get("es", 0))
         if est is None:
             continue
 
@@ -1155,7 +1179,11 @@ def validate_shard(shard_path: str, seed: int = 42):
                 mod_rolls=_sample_mod_rolls(s),
                 pdps=s.get("pd", 0.0),
                 edps=s.get("ed", 0.0),
-                mod_stats=_sample_mod_stats(s))
+                mod_stats=_sample_mod_stats(s),
+                item_level=s.get("il", 0),
+                armour=s.get("ar", 0),
+                evasion=s.get("ev", 0),
+                energy_shield=s.get("es", 0))
             if est is None:
                 continue
 

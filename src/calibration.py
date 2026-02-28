@@ -617,7 +617,10 @@ class CalibrationEngine:
                       mod_rolls: dict = None, pdps: float = 0.0,
                       edps: float = 0.0,
                       demand_score: float = 0.0,
-                      mod_stats: dict = None) -> Optional[float]:
+                      mod_stats: dict = None,
+                      item_level: int = 0,
+                      armour: int = 0, evasion: int = 0,
+                      energy_shield: int = 0) -> Optional[float]:
         """GBM estimate via pure-Python tree traversal. No sklearn at runtime.
 
         Returns estimated divine value, or None if no model available.
@@ -648,6 +651,12 @@ class CalibrationEngine:
             "pdps": pdps,
             "edps": edps,
             "demand_score": demand_score,
+            "item_level": item_level,
+            "armour": armour,
+            "evasion": evasion,
+            "energy_shield": energy_shield,
+            "total_dps": pdps + edps,
+            "total_defense": armour + evasion + energy_shield,
         }
 
         # Mod features: roll-quality-weighted tier encoding
@@ -739,7 +748,11 @@ class CalibrationEngine:
                  mod_rolls: dict = None,
                  pdps: float = 0.0,
                  edps: float = 0.0,
-                 mod_stats: dict = None) -> Optional[float]:
+                 mod_stats: dict = None,
+                 item_level: int = 0,
+                 armour: int = 0,
+                 evasion: int = 0,
+                 energy_shield: int = 0) -> Optional[float]:
         """Return estimated divine value, or None if insufficient data.
 
         Priority: GBM > class k-NN > global k-NN > grade median.
@@ -780,7 +793,10 @@ class CalibrationEngine:
                 mod_tiers=mod_tiers, mod_rolls=mod_rolls,
                 pdps=pdps, edps=edps,
                 demand_score=query_demand,
-                mod_stats=mod_stats)
+                mod_stats=mod_stats,
+                item_level=item_level,
+                armour=armour, evasion=evasion,
+                energy_shield=energy_shield)
             if gbm_est is not None:
                 self.last_confidence = 0.8  # GBM is most confident
                 return gbm_est
