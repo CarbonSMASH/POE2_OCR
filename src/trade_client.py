@@ -1541,30 +1541,46 @@ class TradeClient:
             pass  # Malformed headers — ignore silently
 
     def _compute_adaptive_interval(self):
-        """Compute the safest request interval based on current API usage.
+        """Compute request interval based on current API usage.
 
-        Called inside _rate_lock. For each window, if usage exceeds 50%
-        of the limit, switches to the safe rate (window_secs / max_hits).
-        Returns the most conservative (largest) interval across all windows.
+        Called inside _rate_lock. Uses graduated backoff: no slowdown
+        below 75% usage, then linearly scales from _min_interval to
+        safe_rate between 75-95% usage. Above 95% uses full safe_rate.
+        If the last request was longer ago than a rule's window, that
+        rule's state is expired and ignored (avoids stale slowdowns
+        when resuming after a pause).
+        Returns the most conservative interval across all windows.
         Falls back to _min_interval when no rules are known.
         """
         if not self._rl_rules:
             return self._min_interval
 
         best_interval = self._min_interval
+        now = time.time()
 
         for i, (max_hits, window, penalty) in enumerate(self._rl_rules):
             safe_rate = window / max_hits
             if i < len(self._rl_state):
                 current_hits, _, _ = self._rl_state[i]
+                # If our last request was longer ago than this window,
+                # the server has expired those hits — ignore stale state
+                if now - self._last_request_time > window:
+                    continue
                 usage_ratio = current_hits / max_hits if max_hits > 0 else 1.0
-                if usage_ratio >= 0.5 and safe_rate > best_interval:
-                    if safe_rate > self._min_interval:
-                        logger.info(
-                            f"TradeClient: adaptive backoff — "
-                            f"{current_hits}/{max_hits} hits in {window}s "
-                            f"window, slowing to {safe_rate:.1f}s/req")
-                    best_interval = safe_rate
+                if usage_ratio >= 0.75:
+                    # Graduate from min_interval to safe_rate over 75%-95%
+                    if usage_ratio >= 0.95:
+                        interval = safe_rate
+                    else:
+                        t = (usage_ratio - 0.75) / 0.20  # 0.0 at 75%, 1.0 at 95%
+                        interval = self._min_interval + t * (safe_rate - self._min_interval)
+                    if interval > best_interval:
+                        if interval > self._min_interval:
+                            logger.info(
+                                f"TradeClient: adaptive backoff — "
+                                f"{current_hits}/{max_hits} hits in {window}s "
+                                f"window, slowing to {interval:.1f}s/req")
+                        best_interval = interval
 
         return best_interval
 

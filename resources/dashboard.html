@@ -8,6 +8,8 @@
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    @keyframes tweetIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes tweetOut { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(-8px); } }
     @keyframes spin { to { transform: rotate(360deg); } }
     /* Overlay border pulse animations */
     @keyframes borderRainbow {
@@ -1092,7 +1094,8 @@
     // StatCard
     // -----------------------------------------------------------------------
     function CurrencyIcon({ src, size = 24 }) {
-      return <img src={src} alt="" style={{ width: size, height: size, objectFit: "contain", imageRendering: "auto", verticalAlign: "middle" }} />;
+      if (!src) return null;
+      return <img src={src} alt="" style={{ width: size, height: size, objectFit: "contain", imageRendering: "auto", verticalAlign: "middle" }} onError={(e) => { e.target.style.display = "none"; }} />;
     }
 
     function StatCard({ label, value, color, tooltip, iconLeft, iconRight }) {
@@ -5193,14 +5196,14 @@
           signals.push({ type: "big_mover_up", currency: cur.name, change: ch, value: cur.divine_value, volume: cur.volume || 0, priority: Math.abs(ch) * 2 });
         } else if (ch <= -15) {
           signals.push({ type: "big_mover_down", currency: cur.name, change: ch, value: cur.divine_value, volume: cur.volume || 0, priority: Math.abs(ch) * 2 });
-        } else if (Math.abs(ch) >= 5) {
+        } else if (Math.abs(ch) >= 3) {
           signals.push({ type: "moderate_mover", currency: cur.name, change: ch, value: cur.divine_value, volume: cur.volume || 0, priority: Math.abs(ch) });
         }
       }
 
       // Volume spikes (not top-3 by value)
       for (const cur of currencies) {
-        if ((cur.volume || 0) >= 2000 && !topValueNames.has(cur.name)) {
+        if ((cur.volume || 0) >= 1000 && !topValueNames.has(cur.name)) {
           signals.push({ type: "volume_spike", currency: cur.name, change: cur.sparkline_change || 0, value: cur.divine_value, volume: cur.volume, priority: cur.volume / 500 });
         }
       }
@@ -5235,7 +5238,7 @@
 
       // Whale alert
       for (const cur of currencies) {
-        if ((cur.divine_value || 0) > 50 && (cur.volume || 0) > 500) {
+        if ((cur.divine_value || 0) > 20 && (cur.volume || 0) > 300) {
           signals.push({ type: "whale_alert", currency: cur.name, change: cur.sparkline_change || 0, value: cur.divine_value, volume: cur.volume, priority: cur.divine_value / 10 });
         }
       }
@@ -5251,9 +5254,9 @@
       const downCount = withChange.filter(c => c.sparkline_change < 0).length;
       signals.push({ type: "sentiment", currency: "", change: 0, value: 0, volume: 0, priority: 4, extra: { up: upCount, down: downCount, total: withChange.length } });
 
-      // Sort by priority descending and take top 7
+      // Sort by priority descending — keep larger pool for cycling feed
       signals.sort((a, b) => b.priority - a.priority);
-      return signals.slice(0, 7);
+      return signals.slice(0, 12);
     }
 
     const TWEET_TEMPLATES = {
@@ -5349,22 +5352,63 @@
     }
 
     function MarketSignals({ currencies, rates, history }) {
-      const tweets = useMemo(() => {
+      const VISIBLE = 3;
+      const CYCLE_MS = 5000;
+
+      const allTweets = useMemo(() => {
         if (!currencies || currencies.length === 0) return [];
         const signals = generateSignals(currencies, rates, history);
         const d2c = (rates && rates.divine_to_chaos) || 100;
+        const usedTemplates = {};
         return signals.map((sig, i) => {
           const seed = hashStr(sig.type + sig.currency);
-          const analyst = ANALYSTS[seed % ANALYSTS.length];
+          const analyst = ANALYSTS[(seed + i) % ANALYSTS.length];
           const templates = TWEET_TEMPLATES[sig.type] || [];
           if (templates.length === 0) return null;
-          const tpl = templates[seed % templates.length];
+          // Pick a template not yet used for this signal type
+          if (!usedTemplates[sig.type]) usedTemplates[sig.type] = new Set();
+          let tplIdx = seed % templates.length;
+          let attempts = 0;
+          while (usedTemplates[sig.type].has(tplIdx) && attempts < templates.length) {
+            tplIdx = (tplIdx + 1) % templates.length;
+            attempts++;
+          }
+          usedTemplates[sig.type].add(tplIdx);
+          const tpl = templates[tplIdx];
           sig._d2c = d2c;
           const text = tpl(sig);
           const timeAgo = fakeTimeAgo(i, seed);
-          return { signal: { ...sig, text }, analyst, timeAgo };
+          return { signal: { ...sig, text }, analyst, timeAgo, id: sig.type + ":" + sig.currency + ":" + i };
         }).filter(Boolean);
       }, [currencies, rates, history]);
+
+      const [offset, setOffset] = useState(0);
+      const offsetRef = useRef(0);
+      const [exitingId, setExitingId] = useState(null);
+
+      useEffect(() => {
+        if (allTweets.length <= VISIBLE) return;
+        const timer = setInterval(() => {
+          const curOffset = offsetRef.current;
+          const topIdx = curOffset % allTweets.length;
+          setExitingId(allTweets[topIdx]?.id ?? null);
+          setTimeout(() => {
+            const next = curOffset + 1;
+            offsetRef.current = next;
+            setOffset(next);
+            setExitingId(null);
+          }, 400);
+        }, CYCLE_MS);
+        return () => clearInterval(timer);
+      }, [allTweets]);
+
+      // Build visible window (circular)
+      const visible = [];
+      for (let i = 0; i < Math.min(VISIBLE, allTweets.length); i++) {
+        visible.push(allTweets[(offset + i) % allTweets.length]);
+      }
+      // The newest tweet (last in visible) gets enter animation
+      const newestId = visible.length > 0 ? visible[visible.length - 1]?.id : null;
 
       return (
         <div className="panel" style={{
@@ -5380,15 +5424,23 @@
             <span style={{ fontSize: 8, color: T.textMuted, fontStyle: "italic" }}>AI-generated from live data — not financial advice</span>
           </div>
           {/* Tweet feed */}
-          {tweets.length === 0 ? (
+          {allTweets.length === 0 ? (
             <div style={{ fontSize: 11, color: T.textMuted, fontStyle: "italic", textAlign: "center", padding: "10px 0" }}>
               Waiting for market data...
             </div>
           ) : (
-            <div style={{ maxHeight: 380, overflowY: "auto", overflowX: "hidden" }}>
-              {tweets.map((t, i) => (
-                <TweetCard key={i} signal={t.signal} analyst={t.analyst} timeAgo={t.timeAgo} isLast={i === tweets.length - 1} />
-              ))}
+            <div style={{ overflow: "hidden" }}>
+              {visible.map((t, i) => {
+                const isExiting = t.id === exitingId;
+                const isEntering = t.id === newestId && allTweets.length > VISIBLE;
+                return (
+                  <div key={t.id} style={{
+                    animation: isExiting ? "tweetOut 0.4s ease forwards" : isEntering ? "tweetIn 0.4s ease" : "none",
+                  }}>
+                    <TweetCard signal={t.signal} analyst={t.analyst} timeAgo={t.timeAgo} isLast={i === visible.length - 1} />
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

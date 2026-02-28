@@ -90,6 +90,7 @@ class LAMA:
         self._last_scored_result = None
         self._last_scored_cursor = (0, 0)
         self._last_scored_lock = threading.Lock()
+        self._deep_query_active = False  # Debounce guard
 
         # Flag reporter state: snapshot of last displayed item for Ctrl+Shift+F
         self._last_flaggable = None
@@ -1080,6 +1081,10 @@ class LAMA:
 
     def _trigger_deep_query(self):
         """Execute trade API lookup on the last locally-scored item."""
+        if self._deep_query_active:
+            logger.debug("Deep query: ignored (already in progress)")
+            return
+
         with self._last_scored_lock:
             item = self._last_scored_item
             mods = self._last_scored_mods
@@ -1091,6 +1096,7 @@ class LAMA:
         if not self.item_detector.game_window.is_poe2_foreground():
             return
 
+        self._deep_query_active = True
         logger.info(f"Deep query: {item.name or item.base_type}")
         self._deep_query_item_key = item.base_type
         self._price_rare_deep_async(item, mods, score, cx, cy)
@@ -1153,6 +1159,7 @@ class LAMA:
                     cursor_x=cursor_x, cursor_y=cursor_y)
             finally:
                 self._deep_query_item_key = None
+                self._deep_query_active = False
                 search_done.set()
 
         threading.Thread(target=_do_deep, daemon=True,
@@ -1282,15 +1289,30 @@ class LAMA:
                 logger.debug(f"Auto-cal: skipping {display_name} (deep query in progress)")
                 continue
 
+            # Snapshot trade generation so auto-cal aborts if a new item or
+            # deep query comes in while we're searching.
+            with self._trade_gen_lock:
+                cal_gen = self._trade_generation
+
+            def _cal_stale():
+                with self._trade_gen_lock:
+                    return cal_gen != self._trade_generation
+
             try:
                 # Wait out any active rate limit before attempting
                 while self.trade_client._is_rate_limited():
+                    if _cal_stale():
+                        break
                     wait = self.trade_client._rate_limited_until - time.time()
                     if wait > 0:
                         time.sleep(min(wait + 1, 65))
 
+                if _cal_stale():
+                    logger.debug(f"Auto-cal: aborted {display_name} (superseded)")
+                    continue
+
                 result = self.trade_client.price_rare_item(
-                    item, parsed_mods, is_stale=lambda: False)
+                    item, parsed_mods, is_stale=_cal_stale)
                 if result and "Rate limited" in result.display:
                     # Still rate limited — re-queue and back off
                     self._calibration_queue.put((item, parsed_mods, score_result))
