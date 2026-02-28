@@ -1480,6 +1480,9 @@ class TradeClient:
         Breaks sleep into small chunks so stale queries release the lock
         quickly instead of blocking for 10+ seconds.
         """
+        # Early abort before acquiring lock — don't block fresh queries
+        if is_stale and is_stale():
+            return
         with self._rate_lock:
             interval = self._compute_adaptive_interval()
             now = time.time()

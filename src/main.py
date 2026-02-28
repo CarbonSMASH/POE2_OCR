@@ -1114,9 +1114,10 @@ class LAMA:
             with self._trade_gen_lock:
                 return my_gen != self._trade_generation
 
-        self.overlay.show_price(text="Checking...",
-                                tier="low",
-                                cursor_x=cursor_x, cursor_y=cursor_y)
+        # Use update_text instead of show_price for "Checking..." so the
+        # grade overlay stays in place without flashing/repositioning.
+        # The final result will do a full show_price with proper tier.
+        self.overlay.update_text("Checking...")
         search_done = threading.Event()
 
         def _animate_dots():
@@ -1134,11 +1135,28 @@ class LAMA:
                 if _is_stale():
                     return
 
+                # If already rate-limited, don't bother searching — leave
+                # the grade overlay in place and log the status.
+                if self.trade_client._is_rate_limited():
+                    wait = int(self.trade_client._rate_limited_until
+                               - time.time())
+                    logger.info(f"Deep query: rate limited, {wait}s remaining "
+                                f"— keeping grade overlay")
+                    self.overlay.update_text(
+                        f"{score_result.grade.value} (RL {wait}s)")
+                    return
+
                 result = self.trade_client.price_rare_item(
                     item, parsed_mods, is_stale=_is_stale)
                 if _is_stale():
                     return
-                if result:
+                if result and "Rate limited" in result.display:
+                    # Got rate-limited mid-search — restore grade text
+                    logger.info(f"Deep query: hit rate limit mid-search")
+                    self.overlay.update_text(
+                        f"{score_result.grade.value} (RL)")
+                elif result and result.min_price > 0:
+                    # Real price found — full overlay update with tier effects
                     self.overlay.show_price(
                         text=result.display,
                         tier=result.tier,
@@ -1147,10 +1165,12 @@ class LAMA:
                         price_divine=result.min_price)
                     self.stats["successful_lookups"] += 1
                     self._log_calibration(score_result, result, item)
+                elif result:
+                    # No real price (e.g. "+" probably valuable) — text-only
+                    self.overlay.update_text(result.display)
+                    self._log_calibration(score_result, result, item)
                 else:
-                    self.overlay.show_price(
-                        text="No listings", tier="low",
-                        cursor_x=cursor_x, cursor_y=cursor_y)
+                    self.overlay.update_text("No listings")
                     self.stats["not_found"] += 1
             except Exception as e:
                 logger.error(f"Deep query error: {e}", exc_info=True)
@@ -1287,6 +1307,16 @@ class LAMA:
             # will produce the same result and log calibration itself.
             if item.base_type and item.base_type == self._deep_query_item_key:
                 logger.debug(f"Auto-cal: skipping {display_name} (deep query in progress)")
+                continue
+
+            # Defer to give the user time to trigger a deep query before
+            # auto-cal starts consuming API budget for this item.
+            time.sleep(2.0)
+
+            # Re-check after the delay — deep query may have started
+            if self._deep_query_active or (
+                    item.base_type and item.base_type == self._deep_query_item_key):
+                logger.debug(f"Auto-cal: skipping {display_name} (deep query started)")
                 continue
 
             # Snapshot trade generation so auto-cal aborts if a new item or
