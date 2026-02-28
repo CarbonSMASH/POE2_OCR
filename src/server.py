@@ -1109,6 +1109,24 @@ async def trade_kick(req: TradeActionRequest):
 
 
 # ---------------------------------------------------------------------------
+# Rate history endpoint (companion mobile app)
+# ---------------------------------------------------------------------------
+@app.get("/api/rate-history")
+async def get_rate_history(since: int = 0):
+    """Return rate history snapshots for the mobile companion app.
+
+    Query params:
+        since: Unix timestamp — only return entries newer than this (default 0 = all).
+    """
+    if not price_cache:
+        return []
+    history = price_cache._load_rate_history()
+    if since > 0:
+        history = [h for h in history if h.get("ts", 0) > since]
+    return history
+
+
+# ---------------------------------------------------------------------------
 # Market data endpoint (Markets tab)
 # ---------------------------------------------------------------------------
 @app.get("/api/market-data")
