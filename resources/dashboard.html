@@ -2647,8 +2647,15 @@
       };
       const [companionState, setCompanionState] = useState({ enabled: false, host: "", port: 8450, pin: "" });
       const [companionLoading, setCompanionLoading] = useState(false);
+      const [cloudState, setCloudState] = useState({ enabled: false, device_id: "", relay_url: "" });
+      const [cloudLoading, setCloudLoading] = useState(false);
+      const [cloudRelayInput, setCloudRelayInput] = useState("");
       useEffect(() => {
         companionApi("/api/companion/info").then(data => setCompanionState(prev => ({ ...prev, ...data }))).catch(() => {});
+        companionApi("/api/cloud/info").then(data => {
+          setCloudState(prev => ({ ...prev, ...data }));
+          if (data.relay_url) setCloudRelayInput(data.relay_url);
+        }).catch(() => {});
       }, []);
       return (
         <div style={{ marginTop: 8, marginBottom: 8 }}>
@@ -2880,6 +2887,82 @@
                     Windows Firewall may need to allow port {companionState.port} for LAN access.
                   </div>
                 </div>
+              </div>
+            )}
+          </div>
+          {/* Cloud Alerts (push notifications via relay) */}
+          <div className="panel" style={{ ...CARD, padding: 12, marginTop: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ ...LABEL, marginBottom: 0 }}>Cloud Alerts</div>
+              <Toggle value={cloudState.enabled} onChange={async (v) => {
+                setCloudLoading(true);
+                try {
+                  if (v) {
+                    const data = await companionApi("/api/cloud/enable", "POST");
+                    setCloudState({ enabled: true, device_id: data.device_id, relay_url: data.relay_url });
+                  } else {
+                    await companionApi("/api/cloud/disable", "POST");
+                    setCloudState({ enabled: false, device_id: "", relay_url: "" });
+                  }
+                } catch (e) { console.error(e); }
+                setCloudLoading(false);
+              }} size="small" />
+            </div>
+            <div style={{ fontSize: 10, color: T.textSecond, marginBottom: cloudState.enabled ? 10 : 0 }}>
+              Receive push notifications on your phone when watchlist matches are found — even away from your PC.
+            </div>
+            {cloudState.enabled && (
+              <div>
+                {/* Relay URL config */}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 10, color: T.textSecond, marginBottom: 4 }}>Relay URL</div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input
+                      value={cloudRelayInput}
+                      onChange={(e) => setCloudRelayInput(e.target.value)}
+                      placeholder="https://lama-push-relay.your-account.workers.dev"
+                      style={{ flex: 1, background: T.input, border: `1px solid ${T.border}`, color: T.text, padding: "6px 8px", fontSize: 11, borderRadius: 4, fontFamily: "'JetBrains Mono', monospace" }}
+                    />
+                    <button onClick={async () => {
+                      await companionApi("/api/cloud/relay-url", "POST", { relay_url: cloudRelayInput });
+                      setCloudState(prev => ({ ...prev, relay_url: cloudRelayInput }));
+                    }} style={{ ...BTN, background: T.gold, color: "#0d0b08", padding: "6px 12px", fontSize: 10, fontWeight: 600 }}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+                {/* QR code + info */}
+                {cloudState.relay_url ? (
+                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                    <div style={{ textAlign: "center" }}>
+                      <img src={"/api/cloud/qr?t=" + Date.now()} alt="Cloud QR" style={{ width: 120, height: 120, borderRadius: 6, background: "#fff", padding: 4 }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: T.textSecond, marginBottom: 4 }}>Device ID</div>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: T.text, marginBottom: 10, wordBreak: "break-all" }}>{cloudState.device_id}</div>
+                      <div style={{ fontSize: 10, color: T.textSecond, marginBottom: 4 }}>Pairing</div>
+                      <div style={{ fontSize: 10, color: T.text }}>
+                        Scan this QR code in LAMA Mobile to pair for push notifications.
+                        The secret is embedded in the QR — no need to enter it manually.
+                      </div>
+                      <button onClick={async () => {
+                        setCloudLoading(true);
+                        try {
+                          await companionApi("/api/cloud/disable", "POST");
+                          const data = await companionApi("/api/cloud/enable", "POST");
+                          setCloudState({ enabled: true, device_id: data.device_id, relay_url: cloudRelayInput });
+                        } catch (e) { console.error(e); }
+                        setCloudLoading(false);
+                      }} style={{ ...BTN, background: T.input, border: `1px solid ${T.border}`, color: T.textSecond, padding: "4px 10px", fontSize: 10, marginTop: 8 }}>
+                        Regenerate Credentials
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 10, color: T.amber }}>
+                    Set a relay URL above to enable cloud pairing. Deploy the relay worker first — see relay/README.
+                  </div>
+                )}
               </div>
             )}
           </div>

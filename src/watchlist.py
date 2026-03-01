@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import requests
 
+import cloud_notify
 from config import (
     TRADE_API_BASE,
     WATCHLIST_DEFAULT_POLL_INTERVAL,
@@ -222,6 +223,19 @@ class WatchlistWorker:
             })
         except Exception as e:
             logger.warning(f"Watchlist broadcast error: {e}")
+
+        # Cloud push notification for matches
+        if result.total > 0 and not result.error:
+            try:
+                price_info = result.price_low or "N/A"
+                await cloud_notify.push_notification(
+                    title=f"Watchlist: {label}",
+                    body=f"{result.total} listed, cheapest {price_info}",
+                    query_id=qid,
+                    data={"query_id": qid, "trade_url": result.trade_url},
+                )
+            except Exception as e:
+                logger.debug(f"Cloud push failed for {qid}: {e}")
 
     async def _broadcast_log(self, message: str, color: str = "#6b8f71"):
         """Send a log entry to the dashboard console panel + log buffer."""

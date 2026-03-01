@@ -60,6 +60,7 @@ from stash_scorer import StashScorer, TabSummary
 from telemetry import TelemetryUploader
 from trade_actions import TradeActions
 from watchlist import WatchlistWorker
+import cloud_notify
 
 logger = logging.getLogger("dashboard")
 
@@ -138,6 +139,10 @@ DEFAULT_SETTINGS = {
     "window_maximized": False,
     "companion_enabled": False,
     "companion_pin": "",
+    "cloud_enabled": False,
+    "cloud_device_id": "",
+    "cloud_secret": "",
+    "cloud_relay_url": "",
 }
 
 
@@ -571,6 +576,14 @@ async def lifespan(app: FastAPI):
         watchlist_worker.set_session_id(poesessid)
     watchlist_worker.start(loop)
 
+    # Configure cloud push notifications
+    cloud_notify.configure(
+        device_id=settings.get("cloud_device_id", ""),
+        secret=settings.get("cloud_secret", ""),
+        relay_url=settings.get("cloud_relay_url", ""),
+        enabled=settings.get("cloud_enabled", False),
+    )
+
     # Initialize trade actions (authenticated API calls)
     trade_actions = TradeActions(lambda: load_settings().get("poesessid", ""))
 
@@ -849,6 +862,8 @@ def _redact_settings(settings: dict) -> dict:
     else:
         out["poesessid_set"] = False
     out.pop("companion_pin", None)
+    if out.get("cloud_secret"):
+        out["cloud_secret"] = ""
     return out
 
 
@@ -2744,6 +2759,97 @@ async def companion_info():
         result["host"] = get_lan_ip()
         result["port"] = PORT
     return result
+
+
+# ---------------------------------------------------------------------------
+# Cloud Alerts endpoints (push notifications via relay)
+# ---------------------------------------------------------------------------
+@app.post("/api/cloud/enable")
+async def cloud_enable():
+    """Enable cloud alerts — generate device_id + secret, save to settings."""
+    import uuid
+    import secrets as secrets_mod
+    settings = load_settings()
+    device_id = str(uuid.uuid4())
+    secret = secrets_mod.token_hex(16)  # 32-char hex
+    settings["cloud_enabled"] = True
+    settings["cloud_device_id"] = device_id
+    settings["cloud_secret"] = secret
+    save_settings(settings)
+    cloud_notify.configure(
+        device_id=device_id, secret=secret,
+        relay_url=settings.get("cloud_relay_url", ""),
+        enabled=True,
+    )
+    await ws_manager.broadcast({"type": "settings", "settings": _redact_settings(settings)})
+    return {"device_id": device_id, "relay_url": settings.get("cloud_relay_url", "")}
+
+
+@app.post("/api/cloud/disable")
+async def cloud_disable():
+    """Disable cloud alerts — clear credentials."""
+    settings = load_settings()
+    settings["cloud_enabled"] = False
+    settings["cloud_device_id"] = ""
+    settings["cloud_secret"] = ""
+    save_settings(settings)
+    cloud_notify.configure(device_id="", secret="", relay_url="", enabled=False)
+    await ws_manager.broadcast({"type": "settings", "settings": _redact_settings(settings)})
+    return {"status": "disabled"}
+
+
+@app.get("/api/cloud/qr")
+async def cloud_qr():
+    """Return QR code PNG for mobile cloud pairing."""
+    settings = load_settings()
+    if not settings.get("cloud_enabled") or not settings.get("cloud_device_id"):
+        return JSONResponse({"error": "Cloud alerts not enabled"}, status_code=400)
+    try:
+        import qrcode
+    except ImportError:
+        return JSONResponse({"error": "qrcode library not installed"}, status_code=500)
+    relay_url = settings.get("cloud_relay_url", "")
+    payload = json.dumps({
+        "relay": relay_url,
+        "id": settings["cloud_device_id"],
+        "key": settings["cloud_secret"],
+    })
+    img = qrcode.make(payload)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(buf, media_type="image/png")
+
+
+@app.get("/api/cloud/info")
+async def cloud_info():
+    """Return cloud alerts status (no secret exposed)."""
+    settings = load_settings()
+    enabled = settings.get("cloud_enabled", False)
+    result = {"enabled": enabled}
+    if enabled:
+        result["device_id"] = settings.get("cloud_device_id", "")
+        result["relay_url"] = settings.get("cloud_relay_url", "")
+    return result
+
+
+@app.post("/api/cloud/relay-url")
+async def cloud_set_relay_url(req: Request):
+    """Update the relay URL."""
+    body = await req.json()
+    relay_url = body.get("relay_url", "").strip()
+    settings = load_settings()
+    settings["cloud_relay_url"] = relay_url
+    save_settings(settings)
+    cloud_notify.configure(
+        device_id=settings.get("cloud_device_id", ""),
+        secret=settings.get("cloud_secret", ""),
+        relay_url=relay_url,
+        enabled=settings.get("cloud_enabled", False),
+    )
+    await ws_manager.broadcast({"type": "settings", "settings": _redact_settings(settings)})
+    return {"status": "ok", "relay_url": relay_url}
 
 
 # ---------------------------------------------------------------------------
