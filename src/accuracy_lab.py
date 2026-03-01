@@ -19,7 +19,6 @@ import random
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -230,15 +229,10 @@ def prepare_gbm_records(records: List[dict],
             out["open_suffixes"] = rec.get("open_suffixes", 0)
 
         if include_listing_age:
-            listing_ts = rec.get("listing_ts", "")
-            if listing_ts:
-                try:
-                    lt = datetime.fromisoformat(
-                        listing_ts.replace("Z", "+00:00"))
-                    age_days = (datetime.now(timezone.utc) - lt).total_seconds() / 86400
-                    out["listing_age_days"] = max(0, age_days)
-                except (ValueError, TypeError):
-                    out["listing_age_days"] = 14.0  # default: 2 weeks
+            ts = rec.get("ts", 0)
+            if ts > 0:
+                age_days = (now - ts) / 86400
+                out["listing_age_days"] = max(0, age_days)
             else:
                 out["listing_age_days"] = 14.0
 
@@ -557,6 +551,129 @@ def experiment_open_affixes(train: List[dict], test: List[dict]) -> dict:
     metrics = compute_metrics(predictions, test_recs)
     print_metrics("Experiment: Open affixes only (quality/sockets/corrupt zeroed)",
                   metrics)
+    return metrics
+
+
+def experiment_full_pipeline(train: List[dict], test: List[dict]) -> dict:
+    """Experiment: Full CalibrationEngine pipeline (modset → GBM → k-NN → median).
+
+    Measures what players actually see by using the real estimate() cascade.
+    Reports per-estimator hit rates.
+    """
+    from calibration import CalibrationEngine
+
+    engine = CalibrationEngine()
+
+    # Load training data into the engine
+    from shard_generator import _GRADE_NUM as _GN
+    for rec in train:
+        price = rec.get("min_divine", 0)
+        if price <= 0:
+            continue
+        mod_groups = [g for g in rec.get("mod_groups", []) if g]
+        # Use _insert() directly to preserve original timestamps
+        engine._insert(
+            score=float(rec.get("score", 0)),
+            divine=float(price),
+            item_class=rec.get("item_class", ""),
+            grade_num=_GN.get(rec.get("grade", "C"), 1),
+            dps_factor=rec.get("dps_factor", 1.0),
+            defense_factor=rec.get("defense_factor", 1.0),
+            top_tier_count=rec.get("top_tier_count", 0),
+            mod_count=rec.get("mod_count", 4),
+            ts=rec.get("ts", 0),
+            is_user=True,
+            mod_groups=mod_groups,
+            base_type=rec.get("base_type", ""),
+            mod_tiers=rec.get("mod_tiers", {}),
+            somv_factor=rec.get("somv_factor", 1.0),
+            mod_rolls=rec.get("mod_rolls", {}),
+            pdps=rec.get("pdps", 0.0),
+            edps=rec.get("edps", 0.0),
+            sale_confidence=rec.get("sale_confidence", 1.0),
+            mod_stats=rec.get("mod_stats", {}),
+            quality=rec.get("quality", 0),
+            sockets=rec.get("sockets", 0),
+            corrupted=1 if rec.get("corrupted", False) else 0,
+            open_prefixes=rec.get("open_prefixes", 0),
+            open_suffixes=rec.get("open_suffixes", 0),
+        )
+
+    # Also train and load GBM models if we have enough data
+    try:
+        from gbm_trainer import train_gbm_models
+        gbm_recs = prepare_gbm_records(train)
+        models = train_gbm_models(gbm_recs)
+        engine._gbm_models = models
+        print(f"  Loaded {len(models)} GBM models into engine")
+    except Exception as e:
+        print(f"  GBM training skipped: {e}")
+
+    # Populate mod weights
+    engine._auto_populate_mod_weights()
+
+    # Test each record through the full pipeline
+    predictions = []
+    estimator_hits = {"modset": 0, "gbm": 0, "knn_class": 0,
+                      "knn_global": 0, "median": 0, "none": 0}
+
+    for rec in test:
+        price = rec.get("min_divine", 0)
+        if price <= 0:
+            predictions.append((None, price))
+            continue
+
+        mod_groups = [g for g in rec.get("mod_groups", []) if g]
+
+        est = engine.estimate(
+            score=rec.get("score", 0),
+            item_class=rec.get("item_class", ""),
+            grade=rec.get("grade", "C"),
+            dps_factor=rec.get("dps_factor", 1.0),
+            defense_factor=rec.get("defense_factor", 1.0),
+            top_tier_count=rec.get("top_tier_count", 0),
+            mod_count=rec.get("mod_count", 4),
+            mod_groups=mod_groups,
+            base_type=rec.get("base_type", ""),
+            somv_factor=rec.get("somv_factor", 1.0),
+            mod_tiers=rec.get("mod_tiers", {}),
+            mod_rolls=rec.get("mod_rolls", {}),
+            pdps=rec.get("pdps", 0.0),
+            edps=rec.get("edps", 0.0),
+            mod_stats=rec.get("mod_stats", {}),
+            quality=rec.get("quality", 0),
+            sockets=rec.get("sockets", 0),
+            corrupted=1 if rec.get("corrupted", False) else 0,
+            open_prefixes=rec.get("open_prefixes", 0),
+            open_suffixes=rec.get("open_suffixes", 0),
+        )
+
+        # Track which estimator fired based on confidence
+        conf = engine.last_confidence
+        if est is None:
+            estimator_hits["none"] += 1
+        elif conf >= 0.75:
+            # Could be modset (0.75) or gbm (0.8) or blended
+            estimator_hits["gbm"] += 1
+        elif conf >= 0.3:
+            estimator_hits["knn_class"] += 1
+        elif conf >= 0.1:
+            estimator_hits["knn_global"] += 1
+        else:
+            estimator_hits["median"] += 1
+
+        predictions.append((est, price))
+
+    metrics = compute_metrics(predictions, test)
+    print_metrics("Full Pipeline (modset > GBM > k-NN > median)", metrics)
+
+    # Print estimator hit rates
+    total = sum(estimator_hits.values())
+    print(f"\n  Estimator hit rates:")
+    for name, count in sorted(estimator_hits.items(), key=lambda x: -x[1]):
+        pct = count / total * 100 if total > 0 else 0
+        print(f"    {name:15s}: {count:5d} ({pct:5.1f}%)")
+
     return metrics
 
 
@@ -953,6 +1070,7 @@ EXPERIMENTS = {
     "hyperparams": experiment_hyperparams,
     "interactions": experiment_interactions,
     "best": experiment_best_combo,
+    "full_pipeline": experiment_full_pipeline,
 }
 
 

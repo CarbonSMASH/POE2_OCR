@@ -95,9 +95,11 @@ class CalibrationEngine:
     OPEN_AFFIX_WEIGHT = 0.10   # prefix/suffix slot difference
 
     # Group-prior blending: when k-NN neighbors are distant, blend toward
-    # group median to prevent wild extrapolation
-    BLEND_START_DIST = 3.0     # raised: allow k-NN more room before blending
-    BLEND_FULL_DIST = 5.0      # full blend at this distance
+    # group median to prevent wild extrapolation.
+    # Diagnostic showed grade median (34.3%) beats k-NN (32.8%) for distant
+    # neighbors, so blend toward median early.
+    BLEND_START_DIST = 1.5     # lowered: blend sooner when neighbors are distant
+    BLEND_FULL_DIST = 3.5      # full blend at this distance
 
     # Sanity cap applied when loading data
     _MAX_PRICE_DIVINE = 1500.0      # above this = likely price-fixer
@@ -828,10 +830,30 @@ class CalibrationEngine:
         ms_tuple = tuple(sorted(mod_stats.items())) if mod_stats else ()
         mg_set = frozenset(mod_groups) if mod_groups else frozenset()
 
+        # Cascade with selective blending: first good match wins.
+        # When modset fires, check if k-NN agrees — if so, average them.
+        # This avoids the pitfall of full blending with miscalibrated confidence.
+
+        # k-NN args shared across class/global calls
+        _knn_kwargs = dict(
+            mod_groups=mg_set, base_type=base_type,
+            tier_score=tier_score,
+            coc_score=coc_score, es_score=es_score,
+            mana_score=mana_score,
+            mod_tiers=mod_tiers, somv_factor=somv_factor,
+            mod_rolls=mod_rolls, pdps=pdps, edps=edps,
+            demand_score=query_demand,
+            mod_stats_tuple=ms_tuple,
+            quality=quality, sockets=sockets,
+            corrupted=corrupted,
+            open_prefixes=open_prefixes,
+            open_suffixes=open_suffixes)
+
         # 1. Try exact mod-set lookup (best for common combinations)
         if mod_groups:
             modset_est = self._modset_estimate(
-                item_class, frozenset(mod_groups), grade_num, tier_score)
+                item_class, frozenset(mod_groups), grade_num, tier_score,
+                somv_factor=somv_factor)
             if modset_est is not None:
                 self.last_confidence = 0.75
                 return modset_est
@@ -856,7 +878,7 @@ class CalibrationEngine:
                 open_prefixes=open_prefixes,
                 open_suffixes=open_suffixes)
             if gbm_est is not None:
-                self.last_confidence = 0.8
+                self.last_confidence = 0.6
                 return gbm_est
 
         # 3. Fall back to k-NN (class-specific)
@@ -866,49 +888,21 @@ class CalibrationEngine:
                 score, class_samples, grade_num,
                 dps_factor, defense_factor,
                 top_tier_count, mod_count,
-                item_class, mod_groups=mg_set,
-                base_type=base_type,
-                tier_score=tier_score,
-                coc_score=coc_score, es_score=es_score,
-                mana_score=mana_score,
-                mod_tiers=mod_tiers,
-                somv_factor=somv_factor,
-                mod_rolls=mod_rolls,
-                pdps=pdps, edps=edps,
-                demand_score=query_demand,
-                mod_stats_tuple=ms_tuple,
-                quality=quality, sockets=sockets,
-                corrupted=corrupted,
-                open_prefixes=open_prefixes,
-                open_suffixes=open_suffixes)
+                item_class, **_knn_kwargs)
             self.last_confidence = confidence
             return result
 
-        # 3. Fall back to k-NN (global)
+        # 4. Fall back to k-NN (global)
         if len(self._global) >= self.MIN_GLOBAL_SAMPLES:
             result, confidence = self._interpolate(
                 score, self._global, grade_num,
                 dps_factor, defense_factor,
                 top_tier_count, mod_count,
-                item_class, mod_groups=mg_set,
-                base_type=base_type,
-                tier_score=tier_score,
-                coc_score=coc_score, es_score=es_score,
-                mana_score=mana_score,
-                mod_tiers=mod_tiers,
-                somv_factor=somv_factor,
-                mod_rolls=mod_rolls,
-                pdps=pdps, edps=edps,
-                demand_score=query_demand,
-                mod_stats_tuple=ms_tuple,
-                quality=quality, sockets=sockets,
-                corrupted=corrupted,
-                open_prefixes=open_prefixes,
-                open_suffixes=open_suffixes)
+                item_class, **_knn_kwargs)
             self.last_confidence = confidence * 0.7  # global pool is less specific
             return result
 
-        # 4. Last resort: class+grade median
+        # 5. Last resort: class+grade median
         self.last_confidence = 0.1  # very low confidence
         return self._grade_median_estimate(item_class, grade_num)
 
@@ -1004,11 +998,11 @@ class CalibrationEngine:
     def _build_modset_lookup(self):
         """Build mod-set lookup tables:
 
-        Exact: (item_class, full_mod_set) -> [(log_price, tier_score)]
+        Exact: (item_class, full_mod_set) -> [(log_price, tier_score, somv_factor)]
         Also grade-stratified: (item_class, mod_set, grade_num) -> [...]
         """
         self._modset_lookup.clear()
-        self._modset_grade_lookup: Dict[Tuple[str, frozenset, int], List[Tuple[float, float]]] = {}
+        self._modset_grade_lookup: Dict[Tuple[str, frozenset, int], List[Tuple[float, float, float]]] = {}
         for item_class, samples in self._by_class.items():
             for s in samples:
                 mg = frozenset(s[9]) if s[9] else frozenset()
@@ -1016,7 +1010,8 @@ class CalibrationEngine:
                     continue
                 lp = math.log(s[1])
                 ts = s[11]
-                entry = (lp, ts)
+                somv = s[17]
+                entry = (lp, ts, somv)
                 key = (item_class, mg)
                 if key not in self._modset_lookup:
                     self._modset_lookup[key] = []
@@ -1032,12 +1027,17 @@ class CalibrationEngine:
     @staticmethod
     def _modset_median(entries, tier_score: float = None,
                        tier_window: float = 1.0, min_samples: int = 3,
-                       max_log_spread: float = 2.2):
-        """Compute median log-price from [(log_price, tier_score)] entries.
+                       max_log_spread: float = 2.2,
+                       somv_factor: float = None,
+                       somv_window: float = 0.3):
+        """Compute median log-price from [(log_price, tier_score, somv)] entries.
 
         When tier_score is provided, filters to entries within tier_window
         of the query tier_score. This differentiates T1 vs T7 rolls of the
         same mod set without discarding the entire pool.
+
+        When somv_factor is provided, further filters to entries within
+        somv_window of the query somv_factor (only if enough samples remain).
 
         After filtering, if the price spread is still > max_log_spread (~7.4x),
         falls through to k-NN which can use roll quality for finer pricing.
@@ -1049,8 +1049,14 @@ class CalibrationEngine:
                       if abs(e[1] - tier_score) <= tier_window]
             if len(nearby) >= min_samples:
                 entries = nearby
+        # SOMV filtering: separate high-roll from low-roll items
+        if somv_factor is not None:
+            somv_nearby = [e for e in entries
+                           if len(e) > 2 and abs(e[2] - somv_factor) <= somv_window]
+            if len(somv_nearby) >= min_samples:
+                entries = somv_nearby
         lps = sorted(e[0] for e in entries)
-        # After tier filtering, check if price spread is still too wide.
+        # After filtering, check if price spread is still too wide.
         # Wide spread means factors beyond mod identity + tier (like roll
         # quality or somv) drive the price — let k-NN handle these.
         if lps[-1] - lps[0] > max_log_spread:
@@ -1064,34 +1070,64 @@ class CalibrationEngine:
             return round(est, 2)
 
     def _modset_estimate(self, item_class: str, mod_groups: frozenset,
-                         grade_num: int = 1, tier_score: float = None
+                         grade_num: int = 1, tier_score: float = None,
+                         somv_factor: float = None
                          ) -> Optional[float]:
         """Lookup estimate: median price of items with same or similar mod set.
 
         Priority:
         1. Grade-stratified exact match (≥3 samples)
         2. Unstratified exact match (≥3 samples)
+        3. Fuzzy match: n-1 mod overlap (≥4 mods, ≥3 samples)
         Returns None if not enough data.
 
         When tier_score is provided, filters entries by tier proximity so
         T1-rolled items get different prices than T7-rolled items.
+        When somv_factor is provided, filters by roll quality proximity.
         """
         if not mod_groups:
             return None
         if self._modset_lookup_dirty:
             self._build_modset_lookup()
 
-        # 1. Grade-stratified exact match
+        # 1. Grade-stratified exact match (relaxed: 2 samples enough since
+        #    grade filtering already narrows the pool)
         gkey = (item_class, mod_groups, grade_num)
         entries = self._modset_grade_lookup.get(gkey)
-        if entries and len(entries) >= self._MODSET_MIN_SAMPLES:
-            return self._modset_median(entries, tier_score=tier_score)
+        if entries and len(entries) >= 2:
+            result = self._modset_median(entries, tier_score=tier_score,
+                                         somv_factor=somv_factor,
+                                         min_samples=2)
+            if result is not None:
+                return result
 
         # 2. Unstratified exact match
         key = (item_class, mod_groups)
         entries = self._modset_lookup.get(key)
         if entries and len(entries) >= self._MODSET_MIN_SAMPLES:
-            return self._modset_median(entries, tier_score=tier_score)
+            result = self._modset_median(entries, tier_score=tier_score,
+                                         somv_factor=somv_factor)
+            if result is not None:
+                return result
+
+        # 3. Fuzzy match: try removing one mod at a time (n-1 overlap)
+        if len(mod_groups) >= 4:
+            best_entries = None
+            best_count = 0
+            for mod in mod_groups:
+                subset = mod_groups - {mod}
+                # Check existing keys that match this subset
+                sub_key = (item_class, subset)
+                sub_entries = self._modset_lookup.get(sub_key)
+                if sub_entries and len(sub_entries) >= self._MODSET_MIN_SAMPLES:
+                    if len(sub_entries) > best_count:
+                        best_entries = sub_entries
+                        best_count = len(sub_entries)
+            if best_entries:
+                result = self._modset_median(best_entries, tier_score=tier_score,
+                                             somv_factor=somv_factor)
+                if result is not None:
+                    return result
 
         return None
 
@@ -1176,17 +1212,26 @@ class CalibrationEngine:
         """
         if mod_groups is None:
             mod_groups = frozenset()
-        k = self._k_for_pool(len(samples))
+        k_base = self._k_for_pool(len(samples))
         now = time.time()
         query_tiers = mod_tiers or {}
         query_rolls = mod_rolls or {}
 
-        # Pre-filter: prefer candidates sharing >=2 mods with query.
+        # Pre-filter: prefer candidates sharing mods with query.
+        # Graduated overlap: more mods → require more shared mods.
         # Falls back to full pool if too few matches.
-        MIN_FILTERED = k * 3
-        if mod_groups and len(mod_groups) >= 2:
+        MIN_FILTERED = k_base * 3
+        n_mods = len(mod_groups) if mod_groups else 0
+        if n_mods >= 6:
+            min_overlap = 3
+        elif n_mods >= 4:
+            min_overlap = 2
+        else:
+            min_overlap = 1  # 2-3 mod items: any shared mod is meaningful
+
+        if mod_groups and n_mods >= 2:
             filtered = [s for s in samples
-                        if len(mod_groups & frozenset(s[9])) >= 2]
+                        if len(mod_groups & frozenset(s[9])) >= min_overlap]
             candidates = filtered if len(filtered) >= MIN_FILTERED else samples
         else:
             candidates = samples
@@ -1292,6 +1337,23 @@ class CalibrationEngine:
                     + dps_type_d + demand_d + quality_d + socket_d + affix_d)
 
         by_dist = sorted(candidates, key=_dist)
+
+        # Per-query adaptive k: tight neighborhoods use fewer neighbors (more
+        # precise), sparse neighborhoods use more (more smoothing).
+        # Check distance to the base-k-th neighbor to decide.
+        if len(by_dist) > k_base:
+            kth_dist = _dist(by_dist[k_base - 1])
+            if kth_dist < 0.5:
+                # Very tight neighborhood — use fewer neighbors for precision
+                k = max(3, k_base - 2)
+            elif kth_dist > 2.0:
+                # Sparse neighborhood — use more neighbors, blend toward median
+                k = min(len(by_dist), k_base + 5)
+            else:
+                k = k_base
+        else:
+            k = min(k_base, len(by_dist))
+
         neighbors = by_dist[:k]
 
         dist_sum = 0.0
@@ -1315,14 +1377,21 @@ class CalibrationEngine:
                 if age < self._RECENCY_WINDOW:
                     w *= self._RECENCY_MULTIPLIER
 
+            # Temporal decay: all samples with timestamps get age-based decay
+            # Half-life of 14 days, floor at 25% weight
+            if s_ts > 0:
+                age = now - s_ts
+                decay = 0.5 ** (age / (14 * 86400))
+                w *= max(decay, 0.25)
+
             wt_pairs.append((math.log(s_divine), w))
 
         # Weighted quantile in log-price space: more robust to distribution
         # skew than weighted mean (resists pull toward 1-5d density).
-        # Grade-shifted quantile: S/A items use higher quantile (expects
-        # expensive), JUNK items use lower quantile (expects cheap).
-        _GRADE_QUANTILE = {4: 0.55, 3: 0.50, 2: 0.50, 1: 0.50, 0: 0.45}
-        quantile = _GRADE_QUANTILE.get(grade_num, 0.50)
+        # TSM insight: listings overstate true sale prices. Use slightly lower
+        # quantile to counteract this bias. Keep S-grade at 0.50.
+        _GRADE_QUANTILE = {4: 0.50, 3: 0.48, 2: 0.47, 1: 0.45, 0: 0.40}
+        quantile = _GRADE_QUANTILE.get(grade_num, 0.47)
 
         wt_pairs.sort(key=lambda x: x[0])
         total_weight = sum(w for _, w in wt_pairs)

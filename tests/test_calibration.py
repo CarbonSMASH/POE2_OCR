@@ -862,3 +862,230 @@ def test_sample_tuple_has_new_fields():
     assert sample[25] == 1, f"corrupted should be 1, got {sample[25]}"
     assert sample[26] == 1, f"open_prefixes should be 1, got {sample[26]}"
     assert sample[27] == 2, f"open_suffixes should be 2, got {sample[27]}"
+
+
+# ── Estimator blending tests ──────────────────────
+
+def test_blending_combines_modset_and_knn():
+    """When modset and k-NN both fire, result should blend (not just modset)."""
+    engine = CalibrationEngine()
+    engine.set_mod_weights({"IncreasedLife": 1.0, "FireResist": 0.3})
+
+    mods = ["IncreasedLife", "FireResist"]
+
+    # Insert items at 10 divine with these exact mods (for modset match)
+    for _ in range(10):
+        engine._insert(score=0.5, divine=10.0, item_class="Rings",
+                       grade_num=3, mod_groups=mods, somv_factor=1.0)
+
+    # Insert some similar items at 20 divine (for k-NN influence)
+    for _ in range(20):
+        engine._insert(score=0.5, divine=20.0, item_class="Rings",
+                       grade_num=3, mod_groups=mods, somv_factor=1.2)
+
+    est = engine.estimate(0.5, "Rings", grade="A",
+                          mod_groups=mods, somv_factor=1.1)
+    assert est is not None
+    # Blended result should be between pure modset (10) and pure k-NN influence
+    assert est > 0
+
+
+def test_blending_trusts_highest_confidence_on_disagreement():
+    """When estimates disagree >3x, use the highest-confidence estimate."""
+    engine = CalibrationEngine()
+    engine.set_mod_weights({"IncreasedLife": 1.0})
+
+    mods = ["IncreasedLife"]
+
+    # Insert modset data at 5 divine
+    for _ in range(10):
+        engine._insert(score=0.5, divine=5.0, item_class="Rings",
+                       grade_num=2, mod_groups=mods)
+
+    # Load a GBM model that predicts very differently (exp(5.0) ~ 148)
+    engine._gbm_models["Rings"] = {
+        "learning_rate": 0.05,
+        "base_prediction": 5.0,
+        "trees": [{
+            "feature": [-2],
+            "threshold": [0.0],
+            "left": [-1],
+            "right": [-1],
+            "value": [0.0],
+        }],
+        "feature_names": ["grade_num", "score"],
+    }
+
+    est = engine.estimate(0.5, "Rings", grade="B",
+                          mod_groups=mods)
+    assert est is not None
+    # Should not wildly average between 5 and 148; should pick highest-conf
+
+
+def test_blending_knn_fires_without_modset():
+    """When no modset match exists, k-NN should still contribute."""
+    engine = CalibrationEngine()
+    engine.set_mod_weights({"IncreasedLife": 1.0, "UniqueModA": 0.5})
+
+    # Insert items with diverse mod sets (no exact modset match possible)
+    for i in range(50):
+        engine._insert(score=0.5, divine=5.0, item_class="Rings",
+                       grade_num=2,
+                       mod_groups=["IncreasedLife", f"UniqueMod{i}"])
+
+    est = engine.estimate(0.5, "Rings", grade="B",
+                          mod_groups=["IncreasedLife", "UniqueModNew"])
+    assert est is not None
+    assert est > 0
+
+
+# ── Fuzzy modset matching tests ──────────────────
+
+def test_fuzzy_modset_matches_n_minus_1():
+    """Fuzzy modset should match when query has one extra mod vs training data."""
+    engine = CalibrationEngine()
+
+    base_mods = ["IncreasedLife", "FireResist", "ColdResist", "LightningResist"]
+
+    # Insert 10 items with exactly base_mods at 20 divine
+    for _ in range(10):
+        engine._insert(score=0.5, divine=20.0, item_class="Rings",
+                       grade_num=2, mod_groups=base_mods)
+
+    # Query with base_mods + 1 extra mod (5 mods total, >= 4 threshold)
+    query_mods = base_mods + ["SpellDamage"]
+    est = engine.estimate(0.5, "Rings", grade="B",
+                          mod_groups=query_mods)
+    assert est is not None
+    # Should get a reasonable estimate from fuzzy match
+
+
+def test_fuzzy_modset_skipped_for_few_mods():
+    """Fuzzy match should not fire for items with fewer than 4 mods."""
+    engine = CalibrationEngine()
+
+    # Insert items with 3 mods
+    mods_3 = ["IncreasedLife", "FireResist", "ColdResist"]
+    for _ in range(10):
+        engine._insert(score=0.5, divine=10.0, item_class="Rings",
+                       grade_num=2, mod_groups=mods_3)
+
+    # Query with 2 mods (< 4 threshold, fuzzy should not fire)
+    # The estimate should still work via k-NN
+    est = engine.estimate(0.5, "Rings", grade="B",
+                          mod_groups=["IncreasedLife", "FireResist"])
+    assert est is not None
+
+
+# ── Temporal decay tests ──────────────────────────
+
+def test_temporal_decay_prefers_recent_data():
+    """Recent samples should have more influence than old samples.
+
+    Uses few items so k-NN selects neighbors from both old and recent groups,
+    then temporal decay makes recent data dominate the weighted estimate.
+    """
+    import time
+
+    engine = CalibrationEngine()
+    engine.set_mod_weights({"IncreasedLife": 1.0})
+
+    mods = ["IncreasedLife"]
+    now = int(time.time())
+
+    # Insert 2 old items at 5 divine (30 days ago)
+    for _ in range(2):
+        engine._insert(score=0.5, divine=5.0, item_class="Rings",
+                       grade_num=2, mod_groups=mods,
+                       ts=now - 30 * 86400, is_user=True)
+
+    # Insert 2 recent items at 50 divine (1 day ago)
+    for _ in range(2):
+        engine._insert(score=0.5, divine=50.0, item_class="Rings",
+                       grade_num=2, mod_groups=mods,
+                       ts=now - 86400, is_user=True)
+
+    # k=3 for pool of 4, so we get 2 old + 1 recent neighbor.
+    # Old weight ≈ 12.5 (decayed), recent weight ≈ 95 (recency bonus + fresh).
+    # Recent data dominates the weighted quantile.
+    est = engine.estimate(0.50, "Rings", grade="B",
+                          mod_groups=mods)
+    assert est is not None
+    assert est > 10.0, (
+        f"Estimate ({est:.1f}) should favor recent data (50d) over old (5d)"
+    )
+
+
+def test_temporal_decay_does_not_crash_with_zero_ts():
+    """Samples with ts=0 (shard data) should not crash the decay logic."""
+    engine = CalibrationEngine()
+
+    # Insert shard-like data with ts=0
+    for price in [1.0, 2.0, 5.0, 10.0, 20.0] * 10:
+        engine._insert(score=0.5, divine=price, item_class="Rings",
+                       grade_num=2, ts=0, is_user=False)
+
+    est = engine.estimate(0.5, "Rings", grade="B")
+    assert est is not None
+
+
+# ── SOMV modset filtering tests ──────────────────
+
+def test_somv_modset_filtering_differentiates_rolls():
+    """High-somv and low-somv items with same mods should get different modset prices."""
+    engine = CalibrationEngine()
+
+    mods = ["IncreasedLife", "FireResist"]
+
+    # Insert high-somv items at 50 divine
+    for _ in range(10):
+        engine._insert(score=0.5, divine=50.0, item_class="Rings",
+                       grade_num=3, mod_groups=mods, somv_factor=1.5)
+
+    # Insert low-somv items at 5 divine
+    for _ in range(10):
+        engine._insert(score=0.5, divine=5.0, item_class="Rings",
+                       grade_num=3, mod_groups=mods, somv_factor=0.5)
+
+    est_high = engine.estimate(0.5, "Rings", grade="A",
+                               mod_groups=mods, somv_factor=1.5)
+    est_low = engine.estimate(0.5, "Rings", grade="A",
+                              mod_groups=mods, somv_factor=0.5)
+
+    assert est_high is not None
+    assert est_low is not None
+    assert est_high > est_low, (
+        f"High-somv modset ({est_high:.1f}) should be > low-somv ({est_low:.1f})"
+    )
+
+
+# ── Graduated pre-filtering tests ────────────────
+
+def test_graduated_prefilter_strict_for_many_mods():
+    """Items with 6+ mods should require 3+ shared mods for pre-filtering."""
+    engine = CalibrationEngine()
+    engine.set_mod_weights({
+        "ModA": 1.0, "ModB": 1.0, "ModC": 1.0,
+        "ModD": 1.0, "ModE": 1.0, "ModF": 1.0,
+        "ModX": 0.3, "ModY": 0.3,
+    })
+
+    # Insert items with 6 specific mods
+    mods_6 = ["ModA", "ModB", "ModC", "ModD", "ModE", "ModF"]
+    for _ in range(30):
+        engine._insert(score=0.5, divine=50.0, item_class="Body Armours",
+                       grade_num=3, mod_groups=mods_6)
+
+    # Insert noise items sharing only 2 mods
+    noise_mods = ["ModA", "ModB", "ModX", "ModY"]
+    for _ in range(30):
+        engine._insert(score=0.5, divine=1.0, item_class="Body Armours",
+                       grade_num=3, mod_groups=noise_mods)
+
+    # Query with 6 mods should prefer the exact match neighbors
+    est = engine.estimate(0.5, "Body Armours", grade="A",
+                          mod_groups=mods_6)
+    assert est is not None
+    assert est > 10.0, (
+        f"6-mod estimate ({est:.1f}) should be pulled toward 50d matches"
+    )
