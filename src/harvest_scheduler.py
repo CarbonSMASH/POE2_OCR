@@ -40,6 +40,25 @@ ACCURACY_SCRIPT = SRC_DIR / "accuracy_lab.py"
 DISAPPEARANCE_SCRIPT = SRC_DIR / "disappearance_tracker.py"
 
 
+def wait_for_rate_limit(max_wait: int = 300) -> bool:
+    """Wait for any active API rate limit penalty to clear.
+
+    Polls every 30s up to max_wait seconds total.
+    Returns True if penalty cleared, False if still active after max_wait.
+    """
+    waited = 0
+    while waited < max_wait:
+        penalty = check_rate_limit()
+        if penalty <= 5:
+            return True
+        wait_chunk = min(30, penalty, max_wait - waited)
+        print(f"  Rate limit active ({penalty}s remaining), "
+              f"waiting {wait_chunk}s...")
+        time.sleep(wait_chunk)
+        waited += wait_chunk
+    return check_rate_limit() <= 5
+
+
 def count_records() -> int:
     """Count total calibration records across all shard files."""
     total = 0
@@ -357,9 +376,17 @@ def main():
             penalty = check_rate_limit()
             if penalty > 120:
                 print(f"\n  API rate limit active: {penalty}s remaining. "
-                      f"Skipping this cycle.")
+                      f"Skipping harvest.")
                 if args.once:
-                    print("  (Run again after the penalty expires.)")
+                    # Still run disappearance check on old records
+                    if not args.no_disappearance:
+                        print("\n  Waiting for rate limit to clear "
+                              "for disappearance check...")
+                        if wait_for_rate_limit(max_wait=penalty + 30):
+                            run_disappearance_check()
+                        else:
+                            print("  Rate limit still active, "
+                                  "skipping disappearance check.")
                     break
                 print(f"  Will retry in {args.cooldown}s...")
                 time.sleep(args.cooldown)
@@ -378,8 +405,13 @@ def main():
             # Advance pass counter for next cycle
             next_start += args.passes
 
-            # Run disappearance check to tag sold vs stale listings
+            # Wait for rate limit cooldown, then run disappearance check
             if not args.no_disappearance:
+                penalty = check_rate_limit()
+                if penalty > 5:
+                    print(f"\n  Cooling down before disappearance check "
+                          f"({penalty}s rate limit)...")
+                    wait_for_rate_limit(max_wait=600)
                 run_disappearance_check()
 
             if not args.no_accuracy:

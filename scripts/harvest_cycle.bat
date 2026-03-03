@@ -3,7 +3,7 @@ REM LAMA Harvest Cycle - runs one harvest cycle (15 passes) with accuracy check.
 REM Designed to be called by Windows Task Scheduler every 4-6 hours.
 REM Uses a lock file to prevent overlapping runs.
 
-setlocal
+setlocal EnableDelayedExpansion
 set LOCKFILE=%USERPROFILE%\.poe2-price-overlay\cache\harvest.lock
 set LOGFILE=%USERPROFILE%\.poe2-price-overlay\cache\harvest_scheduler.log
 set SRCDIR=C:\Users\Stu\GitHub\lama\src
@@ -14,8 +14,16 @@ if not exist "%USERPROFILE%\.poe2-price-overlay\cache" mkdir "%USERPROFILE%\.poe
 
 REM Check for lock file (prevent overlapping runs)
 if exist "%LOCKFILE%" (
-    echo [%date% %time%] Skipping: previous harvest still running ^(lock file exists^) >> "%LOGFILE%"
-    exit /b 0
+    REM If lock file is older than 3 hours, assume the previous run died
+    for /f %%A in ('powershell -NoProfile -Command "(New-TimeSpan -Start (Get-Item \"%LOCKFILE%\").LastWriteTime -End (Get-Date)).TotalHours"') do set LOCK_AGE_H=%%A
+    for /f "tokens=1 delims=." %%I in ("!LOCK_AGE_H!") do set LOCK_AGE_INT=%%I
+    if !LOCK_AGE_INT! GEQ 3 (
+        echo [%date% %time%] Clearing stale lock file ^(!LOCK_AGE_INT!h old^) >> "%LOGFILE%"
+        del "%LOCKFILE%" 2>nul
+    ) else (
+        echo [%date% %time%] Skipping: previous harvest still running ^(lock age: !LOCK_AGE_INT!h^) >> "%LOGFILE%"
+        exit /b 0
+    )
 )
 
 REM Create lock file
