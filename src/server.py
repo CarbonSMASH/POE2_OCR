@@ -55,6 +55,7 @@ from item_lookup import ItemLookup
 from oauth import OAuthManager
 from price_cache import PriceCache
 from game_commands import GameCommander
+from character_client import CharacterClient
 from stash_client import StashClient
 from stash_scorer import StashScorer, TabSummary
 from telemetry import TelemetryUploader
@@ -536,6 +537,7 @@ builds_client = BuildsClient()
 # Stash viewer
 oauth_manager: Optional[OAuthManager] = None
 stash_client: Optional[StashClient] = None
+character_client: Optional[CharacterClient] = None
 stash_scorer: Optional[StashScorer] = None
 stash_data: dict = {
     "tabs": [],           # List[TabSummary serialized]
@@ -552,7 +554,7 @@ stash_data: dict = {
 async def lifespan(app: FastAPI):
     """Set up the event loop reference and background tasks."""
     global watchlist_worker, price_cache, item_lookup, telemetry_uploader, trade_actions
-    global oauth_manager, stash_client, stash_scorer
+    global oauth_manager, stash_client, stash_scorer, character_client
 
     loop = asyncio.get_running_loop()
     overlay.set_loop(loop)
@@ -618,6 +620,7 @@ async def lifespan(app: FastAPI):
     # Initialize OAuth + Stash viewer
     oauth_manager = OAuthManager()
     stash_client = StashClient(oauth_manager)
+    character_client = CharacterClient(oauth_manager)
     stash_scorer = StashScorer()
     def _init_scorer():
         try:
@@ -1946,6 +1949,165 @@ async def oauth_disconnect():
     stash_data["total_value"] = 0.0
     await ws_manager.broadcast({"type": "oauth_status", "connected": False, "account_name": None})
     return {"status": "disconnected"}
+
+
+# ---------------------------------------------------------------------------
+# OAuth character endpoints (GGG Character API)
+# ---------------------------------------------------------------------------
+@app.get("/api/oauth/characters")
+async def oauth_characters():
+    """List all characters for the OAuth-connected account."""
+    if not oauth_manager or not oauth_manager.connected:
+        return JSONResponse(status_code=401, content={"error": "Not connected"})
+    if not character_client:
+        return JSONResponse(status_code=503, content={"error": "Character client not initialized"})
+    loop = asyncio.get_running_loop()
+    chars = await loop.run_in_executor(None, character_client.list_characters)
+    return {
+        "characters": chars,
+        "account_name": oauth_manager.account_name,
+    }
+
+
+class OAuthCharLookupRequest(BaseModel):
+    character: str
+
+
+@app.post("/api/oauth/character/lookup")
+async def oauth_character_lookup(req: OAuthCharLookupRequest):
+    """Fetch a specific character via GGG API and return enriched data."""
+    if not oauth_manager or not oauth_manager.connected:
+        return JSONResponse(status_code=401, content={"error": "Not connected"})
+    if not character_client:
+        return JSONResponse(status_code=503, content={"error": "Character client not initialized"})
+    if not req.character.strip():
+        return JSONResponse(status_code=400, content={"error": "Character name required"})
+
+    loop = asyncio.get_running_loop()
+    char_data = await loop.run_in_executor(
+        None, character_client.get_character, req.character.strip()
+    )
+    if not char_data:
+        return JSONResponse(status_code=404, content={"error": "Character not found"})
+
+    result = builds_client.serialize_character(char_data)
+    result["source"] = "ggg"
+
+    # Detect league from character list
+    chars = await loop.run_in_executor(None, character_client.list_characters)
+    for ch in chars:
+        if ch.get("name") == char_data.name:
+            result["detected_league"] = ch.get("league", "")
+            break
+
+    # Enrich equipment mods with tier data
+    if item_lookup and item_lookup.ready:
+        try:
+            mp = item_lookup._mod_parser
+            mdb = item_lookup._mod_database
+            for i, eq in enumerate(char_data.equipment):
+                if eq.slot in _SKIP_SLOTS:
+                    continue
+                tier_data = enrich_item_mods(eq, mp, mdb)
+                if tier_data and i < len(result.get("equipment", [])):
+                    result["equipment"][i]["modTiers"] = tier_data
+        except Exception as e:
+            logger.debug(f"Mod tier enrichment failed: {e}")
+
+    return result
+
+
+class PriceGearRequest(BaseModel):
+    character: str
+
+
+@app.post("/api/oauth/character/price-gear")
+async def oauth_price_gear(req: PriceGearRequest):
+    """Price all equipped items on a character via GGG API."""
+    if not oauth_manager or not oauth_manager.connected:
+        return JSONResponse(status_code=401, content={"error": "Not connected"})
+    if not character_client:
+        return JSONResponse(status_code=503, content={"error": "Character client not initialized"})
+    if not req.character.strip():
+        return JSONResponse(status_code=400, content={"error": "Character name required"})
+
+    loop = asyncio.get_running_loop()
+    raw = await loop.run_in_executor(
+        None, character_client.get_character_raw, req.character.strip()
+    )
+    if not raw:
+        return JSONResponse(status_code=404, content={"error": "Character not found"})
+
+    # Extract equipment items from raw GGG response
+    char_data = raw.get("character", raw) if isinstance(raw, dict) else raw
+    equipment_items = char_data.get("equipment", []) + char_data.get("items", [])
+
+    slots = []
+    total_divine = 0.0
+    d2c = 0.0
+    if price_cache:
+        d2c = getattr(price_cache, "divine_to_chaos", 0) or 0
+
+    for api_item in equipment_items:
+        slot = api_item.get("inventoryId", "")
+        if not slot:
+            continue
+
+        frame_type = api_item.get("frameType", 0)
+        rarity_map = {0: "normal", 1: "magic", 2: "rare", 3: "unique"}
+        rarity = rarity_map.get(frame_type, "normal")
+        item_name = api_item.get("name", "") or api_item.get("typeLine", "")
+        icon = api_item.get("icon", "")
+        slot_display = SLOT_DISPLAY.get(slot, slot)
+
+        estimate = 0.0
+        grade = ""
+
+        if rarity == "unique" and price_cache:
+            # Lookup unique price from cache
+            try:
+                lookup_name = item_name
+                price_data = price_cache.lookup(lookup_name)
+                if price_data and price_data.get("divine"):
+                    estimate = price_data["divine"]
+                elif price_data and price_data.get("chaos") and d2c > 0:
+                    estimate = price_data["chaos"] / d2c
+            except Exception:
+                pass
+        elif rarity == "rare":
+            # Score via item parser + calibration
+            try:
+                from stash_client import StashClient
+                parsed = StashClient.api_item_to_parsed(api_item)
+                if parsed and item_lookup and item_lookup.ready:
+                    score_result = item_lookup.score_item(parsed)
+                    if score_result:
+                        grade = score_result.get("grade", "")
+                        est_divine = score_result.get("estimate_divine", 0)
+                        if est_divine:
+                            estimate = est_divine
+            except Exception:
+                pass
+
+        total_divine += estimate
+
+        slots.append({
+            "slot": slot_display,
+            "name": item_name,
+            "rarity": rarity,
+            "estimate_divine": round(estimate, 2),
+            "grade": grade,
+            "icon": icon,
+        })
+
+    total_chaos = round(total_divine * d2c, 0) if d2c > 0 else 0
+
+    return {
+        "character": req.character.strip(),
+        "slots": slots,
+        "total_divine": round(total_divine, 1),
+        "total_chaos": int(total_chaos),
+    }
 
 
 # ---------------------------------------------------------------------------
